@@ -22,8 +22,11 @@ s3-acceptance = ["s3"]
 s3 = ["object_store/aws"]
 
 [dependencies]
+async-stream.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 chrono.workspace = true
+futures.workspace = true
 hex.workspace = true
 image.workspace = true
 lenso.workspace = true
@@ -33,10 +36,8 @@ serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
-uuid.workspace = true
-
-[dev-dependencies]
 tokio.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

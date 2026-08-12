@@ -10,14 +10,24 @@ pub fn manifest() -> ModuleManifest {
         .summary(
             "Tenant-scoped quarantine, validation, and immutable content references for linked Modules.",
         )
-        .migrations(vec![ModuleMigrationDeclaration {
-            migration_id: "content-vault/0001_create_content_vault_schema".to_owned(),
-            order: 1,
-            store: "host".to_owned(),
-            destructive: false,
-            reversible: false,
-            activation: ModuleMigrationActivation::BeforeActivation,
-        }])
+        .migrations(vec![
+            ModuleMigrationDeclaration {
+                migration_id: "content-vault/0001_create_content_vault_schema".to_owned(),
+                order: 1,
+                store: "host".to_owned(),
+                destructive: false,
+                reversible: false,
+                activation: ModuleMigrationActivation::BeforeActivation,
+            },
+            ModuleMigrationDeclaration {
+                migration_id: "content-vault/0002_streaming_io".to_owned(),
+                order: 2,
+                store: "host".to_owned(),
+                destructive: false,
+                reversible: false,
+                activation: ModuleMigrationActivation::BeforeActivation,
+            },
+        ])
         .build()
 }
 
@@ -40,11 +50,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(non_ok.is_empty(), "manifest lints: {non_ok:#?}");
         assert_eq!(manifest.migrations.len(), CONTENT_VAULT_MIGRATIONS.len());
-        assert_eq!(manifest.migrations[0].store, "host");
-        assert_eq!(
-            manifest.migrations[0].migration_id,
-            CONTENT_VAULT_MIGRATIONS[0].name
-        );
+        for (declaration, migration) in manifest.migrations.iter().zip(CONTENT_VAULT_MIGRATIONS) {
+            assert_eq!(declaration.store, "host");
+            assert_eq!(declaration.migration_id, migration.name);
+        }
     }
 
     #[test]
@@ -53,7 +62,7 @@ mod tests {
         let linked = composition.linked_modules();
         assert_eq!(linked.len(), 1);
         assert_eq!(linked[0].module_name, MODULE_NAME);
-        assert_eq!(linked[0].migrations.len(), 1);
+        assert_eq!(linked[0].migrations.len(), CONTENT_VAULT_MIGRATIONS.len());
         assert_eq!(
             linked[0].migrations[0].name,
             CONTENT_VAULT_MIGRATIONS[0].name

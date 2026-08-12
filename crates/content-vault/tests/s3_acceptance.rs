@@ -2,8 +2,9 @@
 
 use content_vault::migrations::CONTENT_VAULT_MIGRATIONS;
 use content_vault::{
-    CONTENT_VAULT_S3_BUCKET_ENV, CompleteUploadRequest, ContentVault, ContentVaultStores,
-    ImmutablePut, OwnerGrant, OwnerRef, ReserveUploadRequest, StageOutcome,
+    CONTENT_VAULT_S3_BUCKET_ENV, CONTENT_VAULT_STREAMING_CHUNK_SIZE_BYTES, CompleteUploadRequest,
+    ContentVault, ContentVaultStores, ImmutablePut, OwnerGrant, OwnerRef, ReserveUploadRequest,
+    StageOutcome,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -81,6 +82,7 @@ async fn s3_capabilities_are_isolated_and_create_only() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn content_vault_commits_and_reads_through_postgres_and_s3() {
     let database_url = std::env::var("CONTENT_VAULT_TEST_DATABASE_URL")
         .expect("s3-acceptance requires CONTENT_VAULT_TEST_DATABASE_URL; it never silently skips");
@@ -172,4 +174,51 @@ async fn content_vault_commits_and_reads_through_postgres_and_s3() {
             .cleaned_objects
             >= 1
     );
+
+    let streaming_bytes = vec![b's'; 2 * CONTENT_VAULT_STREAMING_CHUNK_SIZE_BYTES as usize + 17];
+    let streaming_digest = hex::encode(Sha256::digest(&streaming_bytes));
+    let descriptor = vault
+        .reserve_streaming_upload(
+            &owner,
+            &ReserveUploadRequest::new(
+                "s3-streaming-reserve",
+                streaming_digest,
+                streaming_bytes.len() as u64,
+                "text/plain",
+                600,
+            ),
+        )
+        .await
+        .expect("reserve S3-backed streaming upload")
+        .commit(std::io::Cursor::new(streaming_bytes.clone()))
+        .await
+        .expect("complete S3-backed streaming upload");
+    let mut verified = vault
+        .fetch_verified(&owner, descriptor.content_id())
+        .await
+        .expect("open verified S3 stream");
+    let mut received = Vec::with_capacity(streaming_bytes.len());
+    while let Some(chunk) = verified
+        .next_chunk()
+        .await
+        .expect("verify the next S3-backed part")
+    {
+        assert!(chunk.len() <= CONTENT_VAULT_STREAMING_CHUNK_SIZE_BYTES as usize);
+        received.extend_from_slice(&chunk);
+    }
+    assert_eq!(received, streaming_bytes);
+    assert!(
+        vault
+            .sweep_terminal_quarantine(chrono::Duration::zero(), 100)
+            .await
+            .expect("sweep streaming S3 quarantine")
+            .cleaned_objects
+            >= 3
+    );
+
+    let mut verified = vault
+        .fetch_verified(&owner, descriptor.content_id())
+        .await
+        .expect("protected S3 stream survives quarantine cleanup");
+    assert!(verified.next_chunk().await.unwrap().is_some());
 }

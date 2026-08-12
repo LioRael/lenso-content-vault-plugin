@@ -20,11 +20,25 @@ It owns the durable lifecycle from upload reservation through quarantine validat
 Supported by the built-in validator: `image/png`, `image/jpeg`, and UTF-8 `text/plain`. Hosts may inject another validator without changing the persistence contract.
 
 V1 accepts complete byte buffers through its Rust API and defaults to a 64 MiB
-maximum. It does not yet provide streaming or multipart upload, so consumers
-with larger artifact contracts must keep their existing object path until a
-streaming Vault revision is available.
+maximum.
 
 See [the V1 design](docs/design/content-vault-v1.md) for the authority boundary and failure semantics.
+
+## Streaming contract
+
+The opt-in Rust streaming seam reserves the same owner-scoped upload lifecycle,
+then accepts or resumes an `AsyncRead` source in fixed 8 MiB parts. It defaults
+to a 1 GiB reservation ceiling without materializing the complete object in the
+production store adapter. `fetch_verified` verifies every persisted part before
+yielding it, so a corrupt part is never returned to the caller.
+
+The first streaming revision intentionally accepts only UTF-8 `text/plain`.
+PNG/JPEG streaming validation, HTTP upload transport, and direct multipart
+tickets remain deferred. A temporary object-store failure during validation is
+retryable and never turns the reservation into a permanent rejection.
+
+See [the streaming design](docs/design/content-vault-streaming-v1.md) for the
+resume, fencing, cleanup, and provider-lifecycle contracts.
 
 ## Transaction precondition
 
