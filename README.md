@@ -69,7 +69,18 @@ fn vault(context: &AppContext) -> Result<ContentVault, content_vault::StoreError
 
 Enable the crate's `s3` feature and set `CONTENT_VAULT_S3_BUCKET`. Credentials, region, endpoint, and HTTP policy use the standard `AWS_*` variables understood by `object_store`; this also supports S3-compatible services such as MinIO. The factory never falls back to memory storage. It reserves disjoint `content-vault/quarantine` and `content-vault/protected` prefixes inside the configured bucket.
 
-The current public Lenso facade cannot yet express a runtime-bearing linked Module without importing private `platform-*` crates. Accordingly, this Module truthfully remains `manifest_only`; the Host or owner Module must call `sweep_terminal_quarantine` from an explicit maintenance hook. Automatic schedule declaration is deferred until Lenso exposes its linked runtime authoring types publicly.
+The linked Module registers `content_vault.sweep_terminal_quarantine.v1` on the
+`content-vault-maintenance` queue and schedules it every minute in UTC. The
+deployment owns its bounded maintenance settings:
+
+```text
+LENSO_MODULE_CONTENT_VAULT__QUARANTINE_GRACE_SECONDS=900
+LENSO_MODULE_CONTENT_VAULT__SWEEP_BATCH_LIMIT=100
+```
+
+The schedule payload is always an empty object and cannot override these
+settings. Invalid Module configuration or missing S3 configuration fails Host
+startup with a structured error; there is no in-memory production fallback.
 
 ## Verification
 
