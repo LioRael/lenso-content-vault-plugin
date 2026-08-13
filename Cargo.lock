@@ -39,9 +39,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android_system_properties"
-version = "0.1.6"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
+checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
 dependencies = [
  "libc",
 ]
@@ -127,6 +127,28 @@ dependencies = [
  "event-listener",
  "event-listener-strategy",
  "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1583,9 +1605,9 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.104"
+version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e0c1080212aad755ea003d18543e8768dd432c48819efd73a7bf1e39b7a5a3a"
+checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -1663,9 +1685,9 @@ dependencies = [
 
 [[package]]
 name = "lenso"
-version = "0.3.42"
+version = "0.3.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "818c050f585f2b84637ea32b7e57854bf1ecc4e834d1ef02ceb61fdaa87665b2"
+checksum = "0723450cce9812db6a62bd57eaa87724863209199cf98be32ff13b0060fb631f"
 dependencies = [
  "anyhow",
  "axum",
@@ -1676,6 +1698,7 @@ dependencies = [
  "lenso-platform-core",
  "lenso-platform-http",
  "lenso-platform-module",
+ "lenso-platform-runtime",
  "lenso-service",
  "lenso-worker",
  "tokio",
@@ -1683,9 +1706,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-api"
-version = "0.1.35"
+version = "0.1.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34b051a5490215b487b430133a7459642b8be867a47dd3ee0f30cb1172e6d03f"
+checksum = "5246a44d5ee8e9bfb67b0dedfdd35763df27c43a946bb406d996e7dcf2f587d8"
 dependencies = [
  "anyhow",
  "axum",
@@ -1718,9 +1741,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-bootstrap"
-version = "0.1.32"
+version = "0.1.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9865ce596e9ec7af5de1704cb59009952d4e62ff81bb6797f8fdbfe1ed63d7dd"
+checksum = "6111ed8fc0e3996cf840baae950e4d1ea7eabcaff3af8b1f961af07b64f3fa62"
 dependencies = [
  "async-trait",
  "lenso-module-auth",
@@ -1767,9 +1790,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-migrate"
-version = "0.1.33"
+version = "0.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b676287c1f96657f846045f2ced3ed41fd124a85d07da2c7b8c408447ecb031"
+checksum = "b738ffeb5fb7ce44230b1bd9cbe7872b75c24f1b95886fffccb391acfe52cf62"
 dependencies = [
  "anyhow",
  "lenso-bootstrap",
@@ -1947,11 +1970,16 @@ dependencies = [
 name = "lenso-module-content-vault"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "async-trait",
+ "bytes",
  "chrono",
+ "futures",
  "hex",
  "image",
  "lenso",
+ "lenso-bootstrap",
+ "lenso-platform-core",
  "object_store",
  "serde",
  "serde_json",
@@ -1982,9 +2010,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-platform-core"
-version = "0.1.23"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "283a9cab5c4e1c4e9f28a3983ddc4e349c586aa5cbb929e626b8b1793fc7c44e"
+checksum = "ea2d087367889d826ea4d8720614c768077ca345fff09a61254d1efa52153654"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2003,6 +2031,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-core",
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
@@ -2010,9 +2039,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-platform-http"
-version = "0.1.22"
+version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92a0c24f3845d81a1b9435672341433148a934491b9cd20fc7d23ae53948230c"
+checksum = "eecf658941bc6cdb69d1340081152e0e237928190493d5c81f0adc428834bbf2"
 dependencies = [
  "async-trait",
  "axum",
@@ -2031,9 +2060,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-platform-module"
-version = "0.1.23"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e51f8a4cd5fb13eb42a3d1b1bc162dd2d4c45d82db3ca7e224c30c2b306f3d8f"
+checksum = "8f188c71219b328b22d002ac2a130c671e71ef9c39a323fbc90e9abe3a264ee2"
 dependencies = [
  "async-trait",
  "lenso-contracts",
@@ -2047,9 +2076,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-platform-module-management"
-version = "0.1.8"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c7acbd2f32e51e5c58af2608a3f72ecdb859b98ceaf7a6ed0d870009606ca92"
+checksum = "2880bc9ddac821ce68dba398c62844a03d986ca39499afc64fc1c317c3b57d20"
 dependencies = [
  "axum",
  "chrono",
@@ -2071,9 +2100,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-platform-provider"
-version = "0.1.23"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f045a88261992c9f1260df946ff03e55af13cfb07adfc3552288361e9da58e7a"
+checksum = "8697bbd69f5b291e3625b053a8e36b7fafb801fcb5ba6a591842d75560343d82"
 dependencies = [
  "async-trait",
  "axum",
@@ -2098,9 +2127,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-platform-runtime"
-version = "0.1.20"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b6baeae87d194b102161ac35307e08692283b3faf3b5b046d6815f2934b9bb1"
+checksum = "b190e81b016a0a8e1132877204f35e1589de6f0d609608735022a72c60d3a4c9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2115,9 +2144,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-platform-runtime-observability"
-version = "0.1.9"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0f81d3760a6b90fcbdcd70eddbf9acd7bdd9466a89508462d7d386d4d95bb8b"
+checksum = "63e63162e337c9ad2b2b28c09729770d79cd2e7033c515fc4c61c4789ce63625"
 dependencies = [
  "axum",
  "base64",
@@ -2135,9 +2164,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-platform-runtime-operations"
-version = "0.1.9"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f1df73b9fed7ae106b82a8c422dd201f5b7eef37e000010c4b9fc5b5bfa85bc"
+checksum = "b46e29728c3d49d2a9f122e05ae859e7e685bddb00bc5861b84f7dbbc12b9542"
 dependencies = [
  "async-trait",
  "axum",
@@ -2156,9 +2185,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-platform-system-plane"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5991683a8bedb69318bd4a806b8d060e818cdcdeaadb16467b9cbb3ed26c8496"
+checksum = "53b0c09316433fd8551acb67b85e6423a7f208b1958b7f9424925e7440f1c47f"
 dependencies = [
  "async-trait",
  "axum",
@@ -2209,9 +2238,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-worker"
-version = "0.1.33"
+version = "0.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3df709fe8de45602e492d62e302211113a93210be2d2bf74a4560ccb6166157c"
+checksum = "768c14e10f70c759bce9e6ee66f15075deb5955b63c29c37a61ad7cf84afe2da"
 dependencies = [
  "anyhow",
  "lenso-bootstrap",
@@ -2815,9 +2844,9 @@ dependencies = [
 
 [[package]]
 name = "portable-atomic"
-version = "1.15.0"
+version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+checksum = "3d20d5497ef88037a52ff98267d066e7f11fcc5e99bbfbd58a42336193aacec3"
 
 [[package]]
 name = "potential_utf"
@@ -4803,9 +4832,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.127"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b70935747edd64d89de3efa29d73789b806c15798f8e7dca4d8ac356b50ce70"
+checksum = "4b067c0c11094aef6b7a801c1e34a26affafdf3d051dba08456b868789aaf9a4"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -4816,9 +4845,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.77"
+version = "0.4.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b7777d5cc23d0e91404e53ce2d5e8ec7acae3026b16233dba62cd3246457950"
+checksum = "c62df1340f32221cb9c54d6a27b030e3dba64361d4a95bed55f9aacb44da291d"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -4826,9 +4855,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.127"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77775f8f3f7217702089053b94958f8f54061a3f663417df76e19cbdcca29bc1"
+checksum = "167ce5e579f6bcf889c4f7175a8a5a585de84e8ff93976ce393efa5f2837aab1"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -4836,9 +4865,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.127"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11d33f857dc2fb11b8bc75aee111aa9cbeb12cd9f25efd3d4c2a3dd4e235284"
+checksum = "f3997c7839262f4ef12cf90b818d6340c18e80f263f1a94bf157d0ec4420380e"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -4849,9 +4878,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.127"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ef64dbcc55df09c7e5a46182d181c2cfa3e925f3da937ea764728b4bbb9dcbf"
+checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
 ]
@@ -4871,9 +4900,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.104"
+version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c435338968042f4f59a557f690a253676d47ce13ceb55d70100e7facf6620a30"
+checksum = "8622dcb61c0bcc9fffa6938bed81210af2da9a7e4a1a834b2e37a59b6dfb6141"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

@@ -25,6 +25,23 @@ pub struct ContentVaultConfig {
     pub staging_lease_seconds: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentVaultStreamingConfig {
+    pub maximum_upload_size_bytes: u64,
+    pub chunk_size_bytes: u32,
+}
+
+pub const CONTENT_VAULT_STREAMING_CHUNK_SIZE_BYTES: u32 = 8 * 1_024 * 1_024;
+
+impl Default for ContentVaultStreamingConfig {
+    fn default() -> Self {
+        Self {
+            maximum_upload_size_bytes: 1_024 * 1_024 * 1_024,
+            chunk_size_bytes: CONTENT_VAULT_STREAMING_CHUNK_SIZE_BYTES,
+        }
+    }
+}
+
 impl Default for ContentVaultConfig {
     fn default() -> Self {
         Self {
@@ -38,11 +55,12 @@ impl Default for ContentVaultConfig {
 
 #[derive(Debug, Clone)]
 pub struct ContentVault {
-    pool: DbPool,
-    quarantine: Arc<dyn QuarantineStore>,
-    protected: Arc<dyn ProtectedStore>,
-    validator: Arc<dyn ContentValidator>,
-    config: ContentVaultConfig,
+    pub(crate) pool: DbPool,
+    pub(crate) quarantine: Arc<dyn QuarantineStore>,
+    pub(crate) protected: Arc<dyn ProtectedStore>,
+    pub(crate) validator: Arc<dyn ContentValidator>,
+    pub(crate) config: ContentVaultConfig,
+    pub(crate) streaming_config: ContentVaultStreamingConfig,
     transaction_authority: Arc<()>,
 }
 
@@ -88,6 +106,7 @@ impl ContentVault {
             protected,
             validator: Arc::new(BasicContentValidator),
             config: ContentVaultConfig::default(),
+            streaming_config: ContentVaultStreamingConfig::default(),
             transaction_authority: Arc::new(()),
         }
     }
@@ -125,6 +144,22 @@ impl ContentVault {
             ));
         }
         self.config = config;
+        Ok(self)
+    }
+
+    pub fn with_streaming_config(
+        mut self,
+        config: ContentVaultStreamingConfig,
+    ) -> Result<Self, ContentVaultError> {
+        if config.maximum_upload_size_bytes == 0
+            || config.chunk_size_bytes != CONTENT_VAULT_STREAMING_CHUNK_SIZE_BYTES
+            || u64::from(config.chunk_size_bytes) > config.maximum_upload_size_bytes
+        {
+            return Err(ContentVaultError::invalid(
+                "streaming configuration must use the fixed 8 MiB chunk size within the upload bound",
+            ));
+        }
+        self.streaming_config = config;
         Ok(self)
     }
 
@@ -432,6 +467,11 @@ impl ContentVault {
         content_id: ContentId,
     ) -> Result<ContentRead, ContentVaultError> {
         let row = self.descriptor_for_active_owner(grant, content_id).await?;
+        if row.size_bytes()? > self.config.maximum_upload_size_bytes {
+            return Err(ContentVaultError::invalid(
+                "content exceeds the buffered read limit; use fetch_verified",
+            ));
+        }
         let bytes = self
             .protected
             .read(&row.protected_key)
@@ -638,11 +678,32 @@ impl ContentVault {
 
         let cutoff = now - grace;
         let candidates = sqlx::query_as::<_, SweepRow>(
-            "SELECT session_id, quarantine_key \
-             FROM content_vault.upload_sessions \
-             WHERE state IN ('committed', 'rejected', 'expired') \
-               AND terminal_at <= $1 \
-             ORDER BY COALESCE(quarantine_cleanup_attempted_at, terminal_at), session_id \
+            "WITH cleanup_candidates AS (\
+                SELECT 'session'::text AS object_kind, sessions.session_id AS object_id, \
+                       sessions.quarantine_key, \
+                       COALESCE(sessions.quarantine_cleanup_attempted_at, sessions.terminal_at) \
+                           AS cleanup_order \
+                FROM content_vault.upload_sessions AS sessions \
+                WHERE sessions.state IN ('committed', 'rejected', 'expired') \
+                  AND sessions.terminal_at <= $1 \
+                UNION ALL \
+                SELECT 'part'::text AS object_kind, parts.part_id AS object_id, \
+                       parts.quarantine_key, \
+                       COALESCE(\
+                           parts.quarantine_cleanup_attempted_at, \
+                           CASE WHEN parts.state = 'abandoned' THEN parts.created_at \
+                                ELSE sessions.terminal_at END\
+                       ) AS cleanup_order \
+                FROM content_vault.upload_parts AS parts \
+                JOIN content_vault.upload_sessions AS sessions \
+                  ON sessions.session_id = parts.session_id \
+                WHERE (parts.state = 'abandoned' AND parts.created_at <= $1) \
+                   OR (sessions.state IN ('committed', 'rejected', 'expired') \
+                       AND sessions.terminal_at <= $1)\
+             ) \
+             SELECT object_kind, object_id, quarantine_key \
+             FROM cleanup_candidates \
+             ORDER BY cleanup_order, object_id \
              LIMIT $2",
         )
         .bind(cutoff)
@@ -656,12 +717,31 @@ impl ContentVault {
             ..SweepReport::default()
         };
         for candidate in candidates {
-            let deleted = self
-                .quarantine
-                .delete_exact(&candidate.quarantine_key)
-                .await
-                .is_ok();
-            let updated = sqlx::query(
+            let (deleted, updated) = self
+                .clean_quarantine_candidate(&candidate, now, cutoff)
+                .await?;
+            if deleted {
+                report.cleaned_objects += updated;
+            } else {
+                report.failed_objects += updated;
+            }
+        }
+        Ok(report)
+    }
+
+    async fn clean_quarantine_candidate(
+        &self,
+        candidate: &SweepRow,
+        now: DateTime<Utc>,
+        cutoff: DateTime<Utc>,
+    ) -> Result<(bool, u64), ContentVaultError> {
+        let deleted = self
+            .quarantine
+            .delete_exact(&candidate.quarantine_key)
+            .await
+            .is_ok();
+        let updated = if candidate.object_kind == "session" {
+            sqlx::query(
                 "UPDATE content_vault.upload_sessions \
                  SET quarantine_cleanup_attempted_at = $1, \
                      quarantine_cleanup_succeeded_at = CASE WHEN $5 THEN $1 \
@@ -673,20 +753,40 @@ impl ContentVault {
                    AND terminal_at <= $4",
             )
             .bind(now)
-            .bind(candidate.session_id)
+            .bind(candidate.object_id)
             .bind(&candidate.quarantine_key)
             .bind(cutoff)
             .bind(deleted)
             .execute(&self.pool)
             .await
-            .map_err(|_| ContentVaultError::database())?;
-            if deleted {
-                report.cleaned_objects += updated.rows_affected();
-            } else {
-                report.failed_objects += updated.rows_affected();
-            }
-        }
-        Ok(report)
+            .map_err(|_| ContentVaultError::database())?
+        } else if candidate.object_kind == "part" {
+            sqlx::query(
+                "UPDATE content_vault.upload_parts AS parts \
+                 SET quarantine_cleanup_attempted_at = $1, \
+                     quarantine_cleanup_succeeded_at = CASE WHEN $5 THEN $1 \
+                                                            ELSE parts.quarantine_cleanup_succeeded_at END, \
+                     quarantine_cleanup_attempts = parts.quarantine_cleanup_attempts + 1, \
+                     updated_at = $1 \
+                 FROM content_vault.upload_sessions AS sessions \
+                 WHERE parts.part_id = $2 AND parts.quarantine_key = $3 \
+                   AND sessions.session_id = parts.session_id \
+                   AND ((parts.state = 'abandoned' AND parts.created_at <= $4) \
+                        OR (sessions.state IN ('committed', 'rejected', 'expired') \
+                            AND sessions.terminal_at <= $4))",
+            )
+            .bind(now)
+            .bind(candidate.object_id)
+            .bind(&candidate.quarantine_key)
+            .bind(cutoff)
+            .bind(deleted)
+            .execute(&self.pool)
+            .await
+            .map_err(|_| ContentVaultError::database())?
+        } else {
+            return Err(ContentVaultError::database());
+        };
+        Ok((deleted, updated.rows_affected()))
     }
 
     fn validate_reservation(
@@ -1382,22 +1482,25 @@ fn protected_key(tenant_id: &str, sha256: &str) -> String {
     )
 }
 
-fn tenant_storage_token(tenant_id: &str) -> String {
+pub(crate) fn tenant_storage_token(tenant_id: &str) -> String {
     sha256_hex(tenant_id.as_bytes())[..32].to_owned()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn as_i64(value: u64) -> Result<i64, ContentVaultError> {
+pub(crate) fn as_i64(value: u64) -> Result<i64, ContentVaultError> {
     i64::try_from(value).map_err(|_| ContentVaultError::invalid("byte size is too large"))
 }
 
-fn map_store_error(error: &StoreError) -> ContentVaultError {
+pub(crate) fn map_store_error(error: &StoreError) -> ContentVaultError {
     match error.kind() {
         StoreErrorKind::ImmutableConflict => {
             ContentVaultError::conflict("immutable storage key already contains different bytes")
+        }
+        StoreErrorKind::InvalidLength => {
+            ContentVaultError::invalid("streamed object length does not match its declaration")
         }
         StoreErrorKind::Unavailable | StoreErrorKind::InvalidKey => ContentVaultError::storage(),
     }
@@ -1466,6 +1569,7 @@ struct ReceiptRow {
 
 #[derive(Debug, FromRow)]
 struct SweepRow {
-    session_id: Uuid,
+    object_kind: String,
+    object_id: Uuid,
     quarantine_key: String,
 }

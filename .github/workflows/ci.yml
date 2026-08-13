@@ -64,7 +64,7 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Verify package contents
-        run: cargo package --locked -p lenso-module-content-vault
+        run: cargo package --locked -p lenso-module-content-vault --features s3
       - name: Stop isolated S3-compatible test storage
         if: always()
         run: docker rm --force content-vault-minio || true

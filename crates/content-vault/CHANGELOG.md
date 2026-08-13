@@ -6,3 +6,5 @@
 - Add reservation, quarantine validation, immutable commit, owner-scoped reads, transactional claims, integrity observations, and terminal quarantine sweeping.
 - Add fail-closed owner/idempotency and integrity evidence contracts, a Vault-issued transaction boundary, recurring grace-period cleanup, and exhaustive rejection acceptance.
 - Add production S3-compatible storage composition with isolated quarantine/protected capabilities and real PostgreSQL + MinIO acceptance.
+- Add resumable, fixed-part streaming ingestion and verified streaming reads with a 1 GiB default ceiling, exact-key cleanup evidence, and bounded object-store I/O.
+- Register a manifest-declared, fallibly loaded Runtime sweeper with bounded deployment configuration and a one-minute UTC schedule through the public Lenso 0.3.44 facade.
