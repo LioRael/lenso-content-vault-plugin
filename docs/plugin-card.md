@@ -35,7 +35,9 @@ explicit Workflow protocol; they must not assume database atomicity.
   stream channel capacity; and a maintenance
   caller allowlist (maximum 64). HTTP is accepted only for one explicit
   `http://` endpoint; credentials are non-empty resolved Secrets values.
-  Production code performs no environment discovery.
+  Production code performs no environment discovery. The package schema uses
+  only the current App-plan-supported JSON Schema subset; native configuration
+  validation retains every semantic bound and fails before activation.
 - State: one fresh pool, object-store handles, validator, and stream task scope
   per prepared Plugin generation. Deactivation closes the pool and cancels all
   generation-owned streams.
