@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "session_id",
+    "state",
+    "expected_sha256",
+    "expected_size_bytes",
+    "media_type",
+    "expires_at",
+    "next_offset"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-8][0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$"
+    },
+    "state": {
+      "$ref": "#/$defs/UploadState"
+    },
+    "expected_sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "expected_size_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1073741824
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 10,
+      "pattern": "^text/plain$"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "next_offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1073741824
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "UploadState": {
+      "type": "string",
+      "enum": ["reserved", "staging", "committed", "rejected", "expired"]
+    }
+  },
+  "title": "ReserveResponse"
+}

@@ -1,16 +1,23 @@
-use lenso::host::Migration;
+//! Immutable Content Vault schema plan.
 
-pub const CONTENT_VAULT_MIGRATIONS: &[Migration] = &[
-    Migration {
-        name: "content-vault/0001_create_content_vault_schema",
-        sql: include_str!("../migrations/0001_create_content_vault_schema.sql"),
-    },
-    Migration {
-        name: "content-vault/0002_streaming_io",
-        sql: include_str!("../migrations/0002_streaming_io.sql"),
-    },
-    Migration {
-        name: "content-vault/0003_pending_quarantine_cleanup_indexes",
-        sql: include_str!("../migrations/0003_pending_quarantine_cleanup_indexes.sql"),
-    },
+use lenso_postgres_kit::{Migration, PlanError, SchemaPlan, sql_migrations};
+
+pub const CONTENT_VAULT_SCHEMA: &str = "content_vault";
+
+pub const CONTENT_VAULT_MIGRATIONS: &[Migration] = sql_migrations![
+    (
+        1,
+        "create-content-vault-schema",
+        "migrations/0001_create_content_vault_schema.sql"
+    ),
+    (2, "add-streaming-io", "migrations/0002_streaming_io.sql"),
+    (
+        3,
+        "make-pending-quarantine-cleanup-crash-safe",
+        "migrations/0003_pending_quarantine_cleanup_indexes.sql"
+    ),
 ];
+
+pub(crate) fn schema_plan() -> Result<SchemaPlan, PlanError> {
+    SchemaPlan::new(CONTENT_VAULT_SCHEMA, CONTENT_VAULT_MIGRATIONS)
+}

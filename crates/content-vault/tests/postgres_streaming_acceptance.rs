@@ -1,17 +1,20 @@
 #![cfg(feature = "postgres-acceptance")]
 
+use crate::test_support::{
+    CONTENT_VAULT_MIGRATIONS, CompleteUploadRequest, ContentDescriptor, ContentVault,
+    ContentVaultConfig, ContentVaultErrorCode, ContentVaultStreamingConfig, ImmutablePut,
+    OwnerGrant, OwnerRef, ProtectedStore, QuarantineStore, ReserveUploadRequest, StageOutcome,
+    StoreByteStream, StoreError, StoreErrorKind, StoreRead,
+};
+use crate::{public::UploadSessionId, storage::STREAMING_ATTEMPT_PREFIX};
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
-use content_vault::migrations::CONTENT_VAULT_MIGRATIONS;
-use content_vault::storage::{STREAMING_ATTEMPT_PREFIX, StoreByteStream, StoreRead};
-use content_vault::{
-    CompleteUploadRequest, ContentDescriptor, ContentVault, ContentVaultConfig,
-    ContentVaultErrorCode, ContentVaultStreamingConfig, ImmutablePut, OwnerGrant, OwnerRef,
-    ProtectedStore, QuarantineStore, ReserveUploadRequest, StageOutcome, StoreError,
-    StoreErrorKind,
-};
 use futures::{StreamExt as _, stream};
+use lenso::{Ctx, PluginError, ProviderStream, RuntimeFailure};
+use lenso_capability_content_vault as capability;
+use lenso_kernel::{CancellationToken, NativeStreamSession};
 use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
@@ -326,7 +329,7 @@ impl Fixture {
             .await
             .unwrap();
         for migration in &CONTENT_VAULT_MIGRATIONS[..migration_count] {
-            sqlx::raw_sql(migration.sql).execute(&pool).await.unwrap();
+            sqlx::raw_sql(migration.sql()).execute(&pool).await.unwrap();
         }
 
         let quarantine = MemoryQuarantine::default();
@@ -506,6 +509,101 @@ async fn deterministic_streaming_validation_failure_is_a_stable_rejection() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn failed_or_cancelled_upload_protocol_cannot_commit_after_all_bytes_arrive() {
+    let fixture = Fixture::new().await;
+
+    for (resource_id, cancel) in [("invalid-extra-frame", false), ("consumer-cancel", true)] {
+        let grant = owner("tenant-stream", resource_id);
+        let bytes = format!("all reserved bytes for {resource_id}").into_bytes();
+        let upload = fixture
+            .vault
+            .reserve_streaming_upload(
+                &grant,
+                &ReserveUploadRequest::new(
+                    format!("{resource_id}-reserve"),
+                    sha256(&bytes),
+                    bytes.len() as u64,
+                    "text/plain",
+                    600,
+                ),
+            )
+            .await
+            .unwrap();
+        let session_id = upload.session_id();
+        let context = Ctx::new(1, None, CancellationToken::new());
+        let (stream, mut provider) =
+            ProviderStream::<capability::ContentVaultUpload>::channel(&context, 1);
+
+        let consumer = async {
+            stream
+                .send(Box::new(capability::UploadFrame {
+                    kind: capability::UploadFrameKind::Chunk,
+                    offset: Some(0),
+                    bytes_base64: Some(Some(STANDARD.encode(&bytes))),
+                    content: None,
+                }))
+                .await
+                .expect("the complete reserved payload is admitted");
+            if cancel {
+                stream.cancel();
+            } else {
+                stream
+                    .send(Box::new(capability::UploadFrame {
+                        kind: capability::UploadFrameKind::Committed,
+                        offset: Some(i64::try_from(bytes.len()).unwrap()),
+                        bytes_base64: None,
+                        content: None,
+                    }))
+                    .await
+                    .expect("the invalid extra frame reaches the provider");
+            }
+        };
+        let provider_task = async { crate::module::drive_upload(&mut provider, upload).await };
+        let ((), result) = futures::join!(consumer, provider_task);
+        if cancel {
+            assert!(matches!(
+                result,
+                Err(PluginError::Runtime(RuntimeFailure::AdmissionClosed))
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(PluginError::Domain(capability::UploadError::InvalidInput))
+            ));
+        }
+
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM content_vault.upload_sessions WHERE session_id = $1",
+        )
+        .bind(session_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "reserved");
+        let committed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM content_vault.content_objects WHERE tenant_id = $1",
+        )
+        .bind(grant.tenant_id())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        let claims: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM content_vault.content_claims WHERE tenant_id = $1",
+        )
+        .bind(grant.tenant_id())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(committed, 0, "a failed protocol must not commit content");
+        assert_eq!(claims, 0, "a failed protocol must not create a claim");
+        assert!(
+            fixture.protected.0.objects.lock().unwrap().is_empty(),
+            "a failed protocol must not promote protected bytes"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_active_streaming_writer_renews_its_database_lease() {
     let fixture = Fixture::new().await;
     let vault = fixture
@@ -613,7 +711,7 @@ async fn cleanup_migration_keeps_legacy_abandoned_writers_unresolved_and_retryab
     .await
     .unwrap();
 
-    sqlx::raw_sql(CONTENT_VAULT_MIGRATIONS[2].sql)
+    sqlx::raw_sql(CONTENT_VAULT_MIGRATIONS[2].sql())
         .execute(&fixture.pool)
         .await
         .unwrap();
@@ -829,7 +927,7 @@ async fn late_streaming_part_put_is_fenced_and_cleaned(fail_after_put: bool) {
 
 async fn pending_part_cleanup_is_unresolved(
     fixture: &Fixture,
-    session_id: content_vault::UploadSessionId,
+    session_id: UploadSessionId,
 ) -> bool {
     sqlx::query_scalar(
         "SELECT writer_resolved_at IS NULL AND quarantine_cleanup_succeeded_at IS NULL \

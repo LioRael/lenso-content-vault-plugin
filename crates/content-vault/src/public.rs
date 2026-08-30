@@ -380,22 +380,78 @@ fn validate_required(
     value: &str,
     maximum_length: usize,
 ) -> Result<(), ContentVaultError> {
-    if value.trim().is_empty() {
+    let mut character_count = 0_usize;
+    let mut contains_non_whitespace = false;
+    for character in value.chars() {
+        character_count += 1;
+        let codepoint = u32::from(character);
+        if matches!(codepoint, 0x00..=0x1f | 0x7f) {
+            return Err(ContentVaultError::invalid(format!(
+                "{label} contains control characters"
+            )));
+        }
+        contains_non_whitespace |= !is_ecmascript_whitespace(character);
+    }
+    if !contains_non_whitespace {
         return Err(ContentVaultError::invalid(format!("{label} is required")));
     }
-    if value.len() > maximum_length {
+    if character_count > maximum_length {
         return Err(ContentVaultError::invalid(format!(
-            "{label} exceeds {maximum_length} bytes"
-        )));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(ContentVaultError::invalid(format!(
-            "{label} contains control characters"
+            "{label} exceeds {maximum_length} characters"
         )));
     }
     Ok(())
 }
 
+// JSON Schema regular expressions use ECMAScript `\s`, whose whitespace set differs from
+// Rust's Unicode `char::is_whitespace` at U+0085 and U+FEFF. Keep the native boundary exact.
+fn is_ecmascript_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'
+            | '\u{000A}'
+            | '\u{000B}'
+            | '\u{000C}'
+            | '\u{000D}'
+            | '\u{0020}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+    )
+}
+
 pub(crate) fn validate_idempotency_key(value: &str) -> Result<(), ContentVaultError> {
     validate_required("idempotency key", value, 300)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_identifier_bounds_count_unicode_code_points_like_json_schema() {
+        assert!(validate_required("identifier", &"界".repeat(200), 200).is_ok());
+        assert!(validate_required("identifier", &"界".repeat(201), 200).is_err());
+        assert!(validate_required("identifier", "\u{200b}", 1).is_ok());
+    }
+
+    #[test]
+    fn opaque_identifier_control_and_whitespace_rules_match_the_contract_pattern() {
+        for rejected in ["", "   ", "\u{00a0}", "\u{feff}"] {
+            assert!(
+                validate_required("identifier", rejected, 200).is_err(),
+                "{rejected:?} must be rejected"
+            );
+        }
+        assert!(validate_required("identifier", "\u{0080}", 200).is_ok());
+        assert!(validate_required("identifier", "\u{0085}", 200).is_ok());
+        assert!(validate_required("identifier", "租户-一", 200).is_ok());
+    }
 }

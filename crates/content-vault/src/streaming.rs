@@ -1,4 +1,7 @@
-use crate::engine::{ContentVault, as_i64, map_store_error, sha256_hex, tenant_storage_token};
+use crate::engine::{
+    CONTENT_VAULT_STREAMING_CHUNK_SIZE_BYTES, ContentVault, as_i64, map_store_error, sha256_hex,
+    tenant_storage_token,
+};
 use crate::errors::{ContentVaultError, ContentVaultErrorCode};
 use crate::public::{
     ContentClaimRole, ContentDescriptor, ContentId, OwnerGrant, ReserveUploadRequest,
@@ -8,14 +11,14 @@ use crate::storage::{STREAMING_ATTEMPT_PREFIX, StoreByteStream};
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Duration, Utc};
 use futures::{StreamExt, TryStreamExt};
-use lenso::host::transaction::{DbPool, LinkedTransaction};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use sqlx::FromRow;
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -51,7 +54,32 @@ impl StreamingUpload {
         R: AsyncRead + Unpin + Send,
     {
         self.vault
-            .commit_streaming_upload(&self.grant, self.session_id, self.next_offset, source)
+            .commit_streaming_upload(&self.grant, self.session_id, self.next_offset, source, None)
+            .await
+    }
+
+    /// Commits only after the caller confirms that the transport ended successfully.
+    ///
+    /// The native Capability adapter uses this gate to distinguish an intentional consumer
+    /// half-close from EOF caused by cancellation or a rejected frame. The upload may persist
+    /// resumable quarantine parts before the gate resolves, but it cannot validate, promote, or
+    /// commit content unless the protocol completed successfully.
+    pub(crate) async fn commit_after_protocol<R>(
+        self,
+        source: R,
+        protocol_success: oneshot::Receiver<()>,
+    ) -> Result<ContentDescriptor, ContentVaultError>
+    where
+        R: AsyncRead + Unpin + Send,
+    {
+        self.vault
+            .commit_streaming_upload(
+                &self.grant,
+                self.session_id,
+                self.next_offset,
+                source,
+                Some(protocol_success),
+            )
             .await
     }
 }
@@ -87,6 +115,20 @@ impl VerifiedContent {
         &self.descriptor
     }
 
+    fn take_legacy_chunk(&mut self) -> Option<Bytes> {
+        let mut remaining = self.legacy_chunk.take()?;
+        let maximum = CONTENT_VAULT_STREAMING_CHUNK_SIZE_BYTES as usize;
+        let chunk = if remaining.len() > maximum {
+            let chunk = remaining.split_to(maximum);
+            self.legacy_chunk = Some(remaining);
+            chunk
+        } else {
+            remaining
+        };
+        self.delivered_bytes += chunk.len() as u64;
+        Some(chunk)
+    }
+
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, ContentVaultError> {
         if self.failed {
             return Err(ContentVaultError::new(
@@ -94,8 +136,7 @@ impl VerifiedContent {
                 "verified content cursor has already failed",
             ));
         }
-        if let Some(chunk) = self.legacy_chunk.take() {
-            self.delivered_bytes = chunk.len() as u64;
+        if let Some(chunk) = self.take_legacy_chunk() {
             return Ok(Some(chunk));
         }
         if self.next_part == self.parts.len() {
@@ -214,11 +255,13 @@ impl ContentVault {
         let digest = streaming_request_digest(&(grant.tenant_id(), grant.owner(), request))?;
         let response = serde_json::to_value(&receipt).map_err(|_| ContentVaultError::database())?;
 
-        let mut transaction = LinkedTransaction::begin(&self.pool)
+        let mut transaction = self
+            .pool
+            .begin()
             .await
             .map_err(|_| ContentVaultError::database())?;
         let inserted = insert_streaming_receipt(
-            transaction.sql(),
+            &mut transaction,
             &scope,
             request.idempotency_key(),
             grant.tenant_id(),
@@ -257,7 +300,7 @@ impl ContentVault {
             .bind(expires_at)
             .bind(now)
             .bind(i64::from(self.streaming_config.chunk_size_bytes))
-            .execute(&mut **transaction.sql())
+            .execute(&mut *transaction)
             .await
             .map_err(|_| ContentVaultError::database())?;
             transaction
@@ -267,7 +310,7 @@ impl ContentVault {
             receipt
         } else {
             let existing = streaming_receipt_in_tx::<UploadSession>(
-                transaction.sql(),
+                &mut transaction,
                 &scope,
                 request.idempotency_key(),
                 &digest,
@@ -434,6 +477,7 @@ impl ContentVault {
         session_id: UploadSessionId,
         expected_offset: u64,
         mut source: R,
+        protocol_success: Option<oneshot::Receiver<()>>,
     ) -> Result<ContentDescriptor, ContentVaultError>
     where
         R: AsyncRead + Unpin + Send,
@@ -460,6 +504,7 @@ impl ContentVault {
                 expected_offset,
                 attempt_token,
                 &mut source,
+                protocol_success,
             )
             .await;
         drop(heartbeat);
@@ -477,6 +522,7 @@ impl ContentVault {
         expected_offset: u64,
         attempt_token: Uuid,
         source: &mut R,
+        protocol_success: Option<oneshot::Receiver<()>>,
     ) -> Result<ContentDescriptor, ContentVaultError>
     where
         R: AsyncRead + Unpin + Send,
@@ -484,6 +530,14 @@ impl ContentVault {
         let session = self
             .ingest_streaming_source(grant, session_id, expected_offset, attempt_token, source)
             .await?;
+        if let Some(protocol_success) = protocol_success {
+            protocol_success.await.map_err(|_| {
+                ContentVaultError::new(
+                    ContentVaultErrorCode::UploadInterrupted,
+                    "upload transport ended without a successful consumer half-close",
+                )
+            })?;
+        }
         let expected_size = session.expected_size_bytes()?;
         let parts = self.uploaded_streaming_parts(session_id).await?;
         let validation = self
@@ -1022,7 +1076,9 @@ impl ContentVault {
         protected_key: &str,
     ) -> Result<ContentDescriptor, ContentVaultError> {
         let now = Utc::now();
-        let mut transaction = LinkedTransaction::begin(&self.pool)
+        let mut transaction = self
+            .pool
+            .begin()
             .await
             .map_err(|_| ContentVaultError::database())?;
         let session = sqlx::query_as::<_, StreamingSessionRow>(
@@ -1041,7 +1097,7 @@ impl ContentVault {
         .bind(grant.owner().resource_type())
         .bind(grant.owner().resource_id())
         .bind(grant.owner().revision_for_store())
-        .fetch_optional(&mut **transaction.sql())
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?
         .ok_or_else(ContentVaultError::not_found)?;
@@ -1084,7 +1140,7 @@ impl ContentVault {
         .bind(&session.media_type)
         .bind(protected_key)
         .bind(now)
-        .fetch_one(&mut **transaction.sql())
+        .fetch_one(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?;
         if blob.size_bytes != session.expected_size_bytes
@@ -1113,7 +1169,7 @@ impl ContentVault {
             .bind(part.byte_offset)
             .bind(part.size_bytes)
             .bind(&part.sha256)
-            .execute(&mut **transaction.sql())
+            .execute(&mut *transaction)
             .await
             .map_err(|_| ContentVaultError::database())?;
         }
@@ -1124,7 +1180,7 @@ impl ContentVault {
         )
         .bind(grant.tenant_id())
         .bind(blob.blob_id)
-        .fetch_all(&mut **transaction.sql())
+        .fetch_all(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?;
         if !parts_match(parts, &stored_parts) {
@@ -1150,7 +1206,7 @@ impl ContentVault {
         .bind(grant.owner().resource_type())
         .bind(grant.owner().resource_id())
         .bind(now)
-        .execute(&mut **transaction.sql())
+        .execute(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?;
         sqlx::query(
@@ -1168,7 +1224,7 @@ impl ContentVault {
         .bind(grant.owner().revision_for_store())
         .bind(ContentClaimRole::initial().as_str())
         .bind(now)
-        .execute(&mut **transaction.sql())
+        .execute(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?;
         let committed = sqlx::query(
@@ -1181,7 +1237,7 @@ impl ContentVault {
         .bind(now)
         .bind(session.session_id)
         .bind(attempt_token)
-        .execute(&mut **transaction.sql())
+        .execute(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?;
         if committed.rows_affected() != 1 {
@@ -1471,7 +1527,7 @@ struct StreamingLeaseHeartbeat {
 
 impl StreamingLeaseHeartbeat {
     fn start(
-        pool: DbPool,
+        pool: PgPool,
         session_id: UploadSessionId,
         attempt_token: Uuid,
         lease_seconds: u32,
@@ -1591,7 +1647,7 @@ fn streaming_request_digest(value: &impl Serialize) -> Result<String, ContentVau
 }
 
 async fn insert_streaming_receipt(
-    transaction: &mut lenso::host::transaction::DbTransaction<'_>,
+    transaction: &mut Transaction<'_, Postgres>,
     scope: &str,
     idempotency_key: &str,
     tenant_id: &str,
@@ -1618,7 +1674,7 @@ async fn insert_streaming_receipt(
 }
 
 async fn streaming_receipt_in_tx<T: DeserializeOwned>(
-    transaction: &mut lenso::host::transaction::DbTransaction<'_>,
+    transaction: &mut Transaction<'_, Postgres>,
     scope: &str,
     idempotency_key: &str,
     digest: &str,

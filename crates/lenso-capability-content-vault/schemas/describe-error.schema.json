@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    { "const": "unauthorized" },
+    { "const": "invalid_input" },
+    { "const": "conflict" },
+    { "const": "not_found" },
+    { "const": "upload_missing" },
+    { "const": "upload_interrupted" },
+    { "const": "upload_rejected" },
+    { "const": "upload_expired" },
+    { "const": "integrity_missing" },
+    { "const": "integrity_mismatch" }
+  ]
+}

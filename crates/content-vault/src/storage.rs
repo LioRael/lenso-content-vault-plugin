@@ -5,7 +5,6 @@ use object_store::{ObjectStore, PutMode, PutOptions, WriteMultipart, path::Path 
 use std::sync::Arc;
 use uuid::Uuid;
 
-pub const CONTENT_VAULT_S3_BUCKET_ENV: &str = "CONTENT_VAULT_S3_BUCKET";
 pub const DEFAULT_QUARANTINE_PREFIX: &str = "content-vault/quarantine";
 pub const DEFAULT_PROTECTED_PREFIX: &str = "content-vault/protected";
 
@@ -505,24 +504,6 @@ impl ContentVaultStores {
     pub fn protected(&self) -> Arc<dyn ProtectedStore> {
         self.protected.clone()
     }
-
-    #[cfg(feature = "s3")]
-    pub fn from_s3_env() -> Result<Self, StoreError> {
-        use object_store::aws::AmazonS3Builder;
-
-        let bucket = s3_bucket_name(std::env::var(CONTENT_VAULT_S3_BUCKET_ENV))?;
-        let store = AmazonS3Builder::from_env()
-            .with_bucket_name(bucket)
-            .with_copy_if_not_exists(s3_copy_if_not_exists_mode())
-            .build()
-            .map_err(|_| {
-                StoreError::new(
-                    StoreErrorKind::Unavailable,
-                    "content vault S3 configuration is invalid",
-                )
-            })?;
-        Self::from_object_store(Arc::new(store))
-    }
 }
 
 async fn put_bounded_chunk(
@@ -553,28 +534,6 @@ fn checked_stream_length(
         return Err(invalid_stream_length());
     }
     Ok(received_size_bytes)
-}
-
-#[cfg(feature = "s3")]
-fn s3_copy_if_not_exists_mode() -> object_store::aws::S3CopyIfNotExists {
-    object_store::aws::S3CopyIfNotExists::Multipart
-}
-
-#[cfg(feature = "s3")]
-fn s3_bucket_name(value: Result<String, std::env::VarError>) -> Result<String, StoreError> {
-    let bucket = value.map_err(|_| {
-        StoreError::new(
-            StoreErrorKind::Unavailable,
-            format!("{CONTENT_VAULT_S3_BUCKET_ENV} is required for S3 storage"),
-        )
-    })?;
-    if bucket.trim().is_empty() {
-        return Err(StoreError::new(
-            StoreErrorKind::Unavailable,
-            format!("{CONTENT_VAULT_S3_BUCKET_ENV} must not be empty"),
-        ));
-    }
-    Ok(bucket)
 }
 
 fn prefixes_overlap(left: &str, right: &str) -> bool {
@@ -806,34 +765,5 @@ mod tests {
         }
 
         ContentVaultStores::with_prefixes(store, "quarantine", "protected").unwrap();
-    }
-
-    #[cfg(feature = "s3")]
-    #[test]
-    fn s3_configuration_fails_closed_without_a_bucket() {
-        assert_eq!(
-            s3_bucket_name(Err(std::env::VarError::NotPresent))
-                .unwrap_err()
-                .kind(),
-            StoreErrorKind::Unavailable
-        );
-    }
-
-    #[cfg(feature = "s3")]
-    #[test]
-    fn s3_configuration_rejects_an_empty_bucket() {
-        assert_eq!(
-            s3_bucket_name(Ok("   ".to_owned())).unwrap_err().kind(),
-            StoreErrorKind::Unavailable
-        );
-    }
-
-    #[cfg(feature = "s3")]
-    #[test]
-    fn s3_streaming_promotion_uses_create_only_multipart_copy() {
-        assert_eq!(
-            s3_copy_if_not_exists_mode(),
-            object_store::aws::S3CopyIfNotExists::Multipart
-        );
     }
 }
