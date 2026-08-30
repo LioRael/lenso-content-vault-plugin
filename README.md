@@ -1,103 +1,149 @@
-# Lenso Content Vault Module
+# Lenso Content Vault Plugin
 
-`lenso-module-content-vault` is a first-party linked Rust Module for accepting untrusted bytes and turning them into tenant-scoped, immutable content references.
+`lenso-content-vault-plugin` is a removable native Lenso Plugin that accepts
+untrusted bytes and turns them into tenant-scoped immutable content references.
+It provides the source-first `lenso.content-vault@1` Capability.
 
-It owns the durable lifecycle from upload reservation through quarantine validation and content-addressed commit. It deliberately does **not** own a consuming application's domain records, metadata, provenance, authorization policy, or domain routes.
+The Plugin owns upload reservations, quarantine and staging, immutable bytes,
+claims, integrity observations, and a bounded maintenance operation. It does
+not own consumer-domain records, routes, or authorization policy. Every
+owner-scoped call must carry an opaque owner grant whose Plugin Instance is the
+Kernel-resolved caller. Protected object keys never cross the Capability.
 
-## V1 contract
+See [the Plugin card](docs/plugin-card.md),
+[the V1 design](docs/design/content-vault-v1.md), and
+[the streaming design](docs/design/content-vault-streaming-v1.md).
 
-- Mandatory tenant and opaque owner identity on every operation.
-- Reservation before staging.
-- Recoverable staging leases prevent expiry cleanup from racing an in-flight object write.
-- SHA-256, byte-size, media-type, and decode validation in quarantine.
-- Immutable protected objects addressed by tenant-scoped content digest.
-- Stable `ContentId` values and owner claims; storage keys are never public.
-- Idempotent reserve and complete commands.
-- Exact-key quarantine cleanup only after PostgreSQL proves a terminal state and a grace period has elapsed.
-- No protected-object deletion in V1.
-- No generic product HTTP surface. The consuming linked Module performs business authorization and owns its routes.
+## Capability workflow
 
-Supported by the built-in validator: `image/png`, `image/jpeg`, and UTF-8 `text/plain`. Hosts may inject another validator without changing the persistence contract.
+The observable workflow is:
 
-V1 accepts complete byte buffers through its Rust API and defaults to a 64 MiB
-maximum.
+1. `reserve` creates an owner-scoped upload reservation.
+2. `upload` opens or resumes a bounded bidirectional Stream at `next_offset`.
+3. Chunk frames are accepted in order. Consumer half-close ends the byte
+   source without closing the provider receive direction.
+4. Validation, quarantine promotion, and PostgreSQL commit produce one
+   immutable content descriptor.
+5. `describe`, `download`, `claim`, and `release_claim` remain owner scoped.
 
-See [the V1 design](docs/design/content-vault-v1.md) for the authority boundary and failure semantics.
+Downloads verify each persisted part before yielding it. Upload and download
+messages use bounded channels and generation-owned tasks, so consumer
+cancellation wakes blocked work. Each Stream closes its provider-send direction
+and emits one terminal outcome.
 
-## Streaming contract
+Frame schemas are discriminated by `kind`: chunks require a non-null offset and
+bounded Base64 bytes and cannot carry a descriptor; committed/descriptor frames
+require a descriptor and cannot carry bytes. A download descriptor starts at
+offset zero. These combinations are Contract validation rules, not conventions
+left to one native provider.
 
-The opt-in Rust streaming seam reserves the same owner-scoped upload lifecycle,
-then accepts or resumes an `AsyncRead` source in fixed 8 MiB parts. It defaults
-to a 1 GiB reservation ceiling without materializing the complete object in the
-production store adapter. `fetch_verified` verifies every persisted part before
-yielding it, so a corrupt part is never returned to the caller.
+`sweep` is an explicit Capability operation. Only exact Plugin Instances in
+`maintenance_callers` may invoke it. Durable cadence belongs to an explicitly
+selected Jobs, Scheduler, or Workflow Plugin; Content Vault does not register a
+hidden cron or Kernel background loop.
 
-The first streaming revision intentionally accepts only UTF-8 `text/plain`.
-PNG/JPEG streaming validation, HTTP upload transport, and direct multipart
-tickets remain deferred. A temporary object-store failure during validation is
-retryable and never turns the reservation into a permanent rejection.
+## Configuration and authority
 
-See [the streaming design](docs/design/content-vault-streaming-v1.md) for the
-resume, fencing, cleanup, and provider-lifecycle contracts.
+The Plugin requires exactly one `lenso.secrets@1` provider. App Composition
+supplies these immutable configuration fields:
 
-## Transaction precondition
+- `database_url_secret`
+- `s3_bucket` and `s3_region`
+- optional `s3_endpoint` and explicit `s3_allow_http`
+- `s3_access_key_id_secret`, `s3_secret_access_key_secret`, and optional
+  `s3_session_token_secret`
+- `quarantine_grace_seconds` (0 through 31,536,000, at most one year),
+  `sweep_batch_limit`, and
+  `stream_channel_capacity`
+- `maintenance_callers`
 
-`ContentVault::begin_transaction` issues an opaque `ContentVaultTransaction` that lets claim changes commit atomically with the owner Module's business write. `claim_content_in_tx` and `release_claim_in_tx` reject transactions issued by another Vault before running SQL, so the same-host database boundary is enforced by the Rust API.
+`s3_allow_http` is valid only with one explicit `http://` endpoint; it is
+rejected when the endpoint is absent or HTTPS. Endpoint userinfo, query, and
+fragment components are rejected so authority cannot be smuggled into Debug
+configuration. Resolved access-key/secret values, and a configured session
+token, must be non-empty. `maintenance_callers` is unique and capped at 64.
 
-## Host wiring
+The implementation never discovers production S3 settings or credentials from
+process environment variables. PostgreSQL and S3 credential values are
+resolved only through the bound Secrets Capability. Quarantine and protected
+areas use disjoint prefixes inside the explicitly selected bucket. Quarantine
+may delete exact keys; protected storage exposes no delete method.
+
+## Operator boundary
+
+Schema ownership is explicit:
 
 ```rust
-use content_vault::module;
-use lenso::host::HostBuilder;
+use content_vault::ContentVaultOperator;
 
-let host = HostBuilder::new()
-    .linked_module(module::linked_module())
-    .build();
+# async fn install(database_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+ContentVaultOperator::setup(database_url).await?;
+ContentVaultOperator::upgrade(database_url).await?;
+# Ok(())
+# }
 ```
 
-The owner Module constructs `ContentVault` with the host database pool and two object-store capabilities: quarantine storage may delete exact keys, while protected storage intentionally has no delete method.
+Plugin `prepare` resolves secrets, connects dependencies, and verifies that the
+current historical schema is already installed. It never runs migrations.
+`setup` and `upgrade` are operator workflows, and the SQL files under
+`crates/content-vault/migrations` remain immutable.
 
-```rust
-use content_vault::{ContentVault, ContentVaultStores};
-use lenso::host::http::AppContext;
+Verification uses the checksum ledger plus a session-local `pg_temp` reference
+built from those same immutable migrations on the same PostgreSQL server. It
+compares the complete owned catalog, including owners, table/type/column ACLs,
+default ACLs, defaults, constraints, indexes, comments, security labels, and
+extra objects. The temporary reference disappears with the connection and is
+not a durable schema mutation.
 
-fn vault(context: &AppContext) -> Result<ContentVault, content_vault::StoreError> {
-    let stores = ContentVaultStores::from_s3_env()?;
-    Ok(ContentVault::from_stores(context.db.clone(), &stores))
-}
-```
+Exact legacy Host deployments are adopted explicitly with
+`adopt_legacy_v1` or `adopt_legacy_current`. Adoption also verifies the old
+`platform.schema_migrations` provenance, preserves rows, and atomically creates
+the checksum ledger. It is a mandatory offline maintenance operation: stop all
+writers and every DDL-capable session for the database owner before the call.
+Its `SHARE`/`ACCESS EXCLUSIVE` locks stabilize the legacy ledger and existing
+tables, but PostgreSQL provides no ordinary schema lock that can prevent the
+same owner from concurrently creating a new object. Runtime `prepare` never
+adopts, and every `connect`/`prepare` performs a fresh full-catalog comparison;
+an extra object created after adoption makes startup fail closed. Adoption
+first takes the database-wide `:lenso-maintenance` transaction advisory lock,
+then the Content Vault-specific lock, so cooperating Plugin operators compose.
 
-Enable the crate's `s3` feature and set `CONTENT_VAULT_S3_BUCKET`. Credentials, region, endpoint, and HTTP policy use the standard `AWS_*` variables understood by `object_store`; this also supports S3-compatible services such as MinIO. The factory never falls back to memory storage. It reserves disjoint `content-vault/quarantine` and `content-vault/protected` prefixes inside the configured bucket.
-
-The linked Module registers `content_vault.sweep_terminal_quarantine.v1` on the
-`content-vault-maintenance` queue and schedules it every minute in UTC. The
-deployment owns its bounded maintenance settings:
-
-```text
-LENSO_MODULE_CONTENT_VAULT__QUARANTINE_GRACE_SECONDS=900
-LENSO_MODULE_CONTENT_VAULT__SWEEP_BATCH_LIMIT=100
-```
-
-The schedule payload is always an empty object and cannot override these
-settings. Invalid Module configuration or missing S3 configuration fails Host
-startup with a structured error; there is no in-memory production fallback.
+The Plugin-first Capability intentionally breaks the old cross-module
+transaction seam. `claim` and `release_claim` run in Content Vault-owned
+transactions; a consuming Plugin cannot combine them atomically with its own
+database write. Consumers must use idempotent commands plus compensation, or a
+future explicitly selected Workflow protocol, when a business action spans
+both Plugins. The lower-level `ContentVaultTransaction` is private production
+code and is never re-exported, including when every Cargo feature is enabled.
+Acceptance suites are compiled as crate-internal test modules rather than
+publishable integration-test APIs. The crate's production surface is Plugin
+configuration/identity plus the deployment operator; engine, storage,
+migrations, and transaction types are not consumer APIs.
 
 ## Verification
 
+Run repository checks with Cargo (workspace contributors may use their local shared-target
+wrapper instead):
+
 ```bash
-cargo fmt --all --check
-cargo test --locked --workspace
-cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-PostgreSQL black-box acceptance is explicit and cannot silently skip:
+PostgreSQL acceptance is explicit and refuses destructive setup unless the
+database name starts with `content_vault_test`:
 
 ```bash
 CONTENT_VAULT_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/content_vault_test \
-  cargo test --locked --workspace --features postgres-acceptance
+  cargo test \
+  --workspace --features postgres-acceptance
 ```
 
-S3-compatible capability acceptance is also explicit and cannot silently skip:
+S3-compatible acceptance may use environment variables as test harness input;
+the test constructs the adapter explicitly. Production Plugin authority still
+comes only from App configuration and Secrets:
 
 ```bash
 CONTENT_VAULT_S3_BUCKET=content-vault-test \
@@ -107,9 +153,10 @@ AWS_DEFAULT_REGION=us-east-1 \
 AWS_ENDPOINT=http://127.0.0.1:9000 \
 AWS_ALLOW_HTTP=true \
 AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
-  cargo test --locked --workspace --features s3-acceptance --test s3_acceptance
+cargo test \
+  -p lenso-content-vault-plugin --features s3-acceptance --lib s3_acceptance::
 ```
 
 ## Status
 
-This repository is a local contribution candidate. It has not been published to crates.io, added to the official catalog, or pushed to a remote repository.
+This repository has not been published from this migration worktree.

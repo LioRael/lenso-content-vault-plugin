@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["content"],
+  "properties": {
+    "content": {
+      "$ref": "#/$defs/ContentDescriptor"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ContentDescriptor": {
+      "type": "object",
+      "required": ["content_id", "sha256", "size_bytes", "media_type", "created_at"],
+      "properties": {
+        "content_id": {
+          "type": "string",
+          "minLength": 36,
+          "maxLength": 36,
+          "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-8][0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 9,
+          "maxLength": 10,
+          "pattern": "^(?:image/png|image/jpeg|text/plain)$"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "title": "DescribeResponse"
+}

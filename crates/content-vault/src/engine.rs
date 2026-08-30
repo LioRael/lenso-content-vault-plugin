@@ -9,11 +9,10 @@ use crate::storage::{
 };
 use crate::validation::{BasicContentValidator, ContentValidator};
 use chrono::{DateTime, Duration, Utc};
-use lenso::host::transaction::{DbPool, DbTransaction, LinkedTransaction};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use sqlx::FromRow;
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -55,7 +54,7 @@ impl Default for ContentVaultConfig {
 
 #[derive(Debug, Clone)]
 pub struct ContentVault {
-    pub(crate) pool: DbPool,
+    pub(crate) pool: PgPool,
     pub(crate) quarantine: Arc<dyn QuarantineStore>,
     pub(crate) protected: Arc<dyn ProtectedStore>,
     pub(crate) validator: Arc<dyn ContentValidator>,
@@ -66,16 +65,12 @@ pub struct ContentVault {
 
 #[derive(Debug)]
 pub struct ContentVaultTransaction<'a> {
-    transaction: LinkedTransaction<'a>,
+    transaction: Transaction<'a, Postgres>,
     authority: Arc<()>,
 }
 
 impl<'a> ContentVaultTransaction<'a> {
-    pub fn sql(&mut self) -> &mut DbTransaction<'a> {
-        self.transaction.sql()
-    }
-
-    pub fn host_transaction(&mut self) -> &mut LinkedTransaction<'a> {
+    pub fn sql(&mut self) -> &mut Transaction<'a, Postgres> {
         &mut self.transaction
     }
 
@@ -96,7 +91,7 @@ impl<'a> ContentVaultTransaction<'a> {
 
 impl ContentVault {
     pub fn new(
-        pool: DbPool,
+        pool: PgPool,
         quarantine: Arc<dyn QuarantineStore>,
         protected: Arc<dyn ProtectedStore>,
     ) -> Self {
@@ -111,14 +106,16 @@ impl ContentVault {
         }
     }
 
-    pub fn from_stores(pool: DbPool, stores: &ContentVaultStores) -> Self {
+    pub fn from_stores(pool: PgPool, stores: &ContentVaultStores) -> Self {
         Self::new(pool, stores.quarantine(), stores.protected())
     }
 
     pub async fn begin_transaction(
         &self,
     ) -> Result<ContentVaultTransaction<'_>, ContentVaultError> {
-        let transaction = LinkedTransaction::begin(&self.pool)
+        let transaction = self
+            .pool
+            .begin()
             .await
             .map_err(|_| ContentVaultError::database())?;
         Ok(ContentVaultTransaction {
@@ -186,11 +183,13 @@ impl ContentVault {
         let digest = reservation_request_digest(grant, request)?;
         let response = serde_json::to_value(&result).map_err(|_| ContentVaultError::database())?;
 
-        let mut transaction = LinkedTransaction::begin(&self.pool)
+        let mut transaction = self
+            .pool
+            .begin()
             .await
             .map_err(|_| ContentVaultError::database())?;
         let inserted = insert_receipt(
-            transaction.sql(),
+            &mut transaction,
             &scope,
             request.idempotency_key(),
             grant.tenant_id(),
@@ -202,7 +201,7 @@ impl ContentVault {
         .await?;
         if !inserted {
             let existing = receipt_in_tx::<UploadSession>(
-                transaction.sql(),
+                &mut transaction,
                 &scope,
                 request.idempotency_key(),
                 &digest,
@@ -243,7 +242,7 @@ impl ContentVault {
         .bind(Uuid::now_v7())
         .bind(expires_at)
         .bind(now)
-        .execute(&mut **transaction.sql())
+        .execute(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?;
 
@@ -651,6 +650,10 @@ impl ContentVault {
             ));
         }
 
+        let staging_cutoff = checked_timestamp_sub(
+            now,
+            Duration::seconds(i64::from(self.config.staging_lease_seconds)),
+        )?;
         let expired = sqlx::query(
             "WITH expirable AS (\
                 SELECT session_id \
@@ -669,14 +672,14 @@ impl ContentVault {
              WHERE sessions.session_id = expirable.session_id",
         )
         .bind(now)
-        .bind(now - Duration::seconds(i64::from(self.config.staging_lease_seconds)))
+        .bind(staging_cutoff)
         .bind(i64::from(limit))
         .execute(&self.pool)
         .await
         .map_err(|_| ContentVaultError::database())?
         .rows_affected();
 
-        let cutoff = now - grace;
+        let cutoff = checked_timestamp_sub(now, grace)?;
         let candidates = sqlx::query_as::<_, SweepRow>(
             "WITH cleanup_candidates AS (\
                 SELECT 'session'::text AS object_kind, sessions.session_id AS object_id, \
@@ -933,7 +936,9 @@ impl ContentVault {
         protected_key_value: &str,
     ) -> Result<ContentDescriptor, ContentVaultError> {
         let now = Utc::now();
-        let mut transaction = LinkedTransaction::begin(&self.pool)
+        let mut transaction = self
+            .pool
+            .begin()
             .await
             .map_err(|_| ContentVaultError::database())?;
         let session = sqlx::query_as::<_, UploadRow>(
@@ -952,14 +957,14 @@ impl ContentVault {
         .bind(grant.owner().resource_type())
         .bind(grant.owner().resource_id())
         .bind(grant.owner().revision_for_store())
-        .fetch_optional(&mut **transaction.sql())
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?
         .ok_or_else(ContentVaultError::not_found)?;
 
         if session.state == "committed" {
             let descriptor =
-                descriptor_for_session_owner_tx(transaction.sql(), grant, request.session_id())
+                descriptor_for_session_owner_tx(&mut transaction, grant, request.session_id())
                     .await?;
             return finish_existing_completion(
                 transaction,
@@ -1003,7 +1008,7 @@ impl ContentVault {
                 )
                 .bind(now)
                 .bind(session.session_id)
-                .execute(&mut **transaction.sql())
+                .execute(&mut *transaction)
                 .await
                 .map_err(|_| ContentVaultError::database())?;
                 transaction
@@ -1045,7 +1050,7 @@ impl ContentVault {
         let response =
             serde_json::to_value(&descriptor).map_err(|_| ContentVaultError::database())?;
         let inserted = insert_receipt(
-            transaction.sql(),
+            &mut transaction,
             scope,
             request.idempotency_key(),
             grant.tenant_id(),
@@ -1057,7 +1062,7 @@ impl ContentVault {
         .await?;
         if !inserted {
             let existing = receipt_in_tx::<ContentDescriptor>(
-                transaction.sql(),
+                &mut transaction,
                 scope,
                 request.idempotency_key(),
                 request_digest_value,
@@ -1085,7 +1090,7 @@ impl ContentVault {
         .bind(&session.media_type)
         .bind(protected_key_value)
         .bind(now)
-        .fetch_one(&mut **transaction.sql())
+        .fetch_one(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?;
         if blob.size_bytes != session.expected_size_bytes
@@ -1114,7 +1119,7 @@ impl ContentVault {
         .bind(grant.owner().resource_type())
         .bind(grant.owner().resource_id())
         .bind(now)
-        .execute(&mut **transaction.sql())
+        .execute(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?;
 
@@ -1133,7 +1138,7 @@ impl ContentVault {
         .bind(grant.owner().revision_for_store())
         .bind(ContentClaimRole::initial().as_str())
         .bind(now)
-        .execute(&mut **transaction.sql())
+        .execute(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?;
 
@@ -1146,7 +1151,7 @@ impl ContentVault {
         .bind(session.candidate_content_id)
         .bind(now)
         .bind(session.session_id)
-        .execute(&mut **transaction.sql())
+        .execute(&mut *transaction)
         .await
         .map_err(|_| ContentVaultError::database())?;
         if committed.rows_affected() != 1 {
@@ -1194,7 +1199,9 @@ impl ContentVault {
         request_digest_value: &str,
         descriptor: ContentDescriptor,
     ) -> Result<ContentDescriptor, ContentVaultError> {
-        let transaction = LinkedTransaction::begin(&self.pool)
+        let transaction = self
+            .pool
+            .begin()
             .await
             .map_err(|_| ContentVaultError::database())?;
         finish_existing_completion(
@@ -1308,8 +1315,17 @@ impl ContentVault {
     }
 }
 
+fn checked_timestamp_sub(
+    timestamp: DateTime<Utc>,
+    duration: Duration,
+) -> Result<DateTime<Utc>, ContentVaultError> {
+    timestamp.checked_sub_signed(duration).ok_or_else(|| {
+        ContentVaultError::invalid("sweep grace exceeds the supported timestamp range")
+    })
+}
+
 async fn finish_existing_completion(
-    mut transaction: LinkedTransaction<'_>,
+    mut transaction: Transaction<'_, Postgres>,
     grant: &OwnerGrant,
     idempotency_key: &str,
     scope: &str,
@@ -1318,7 +1334,7 @@ async fn finish_existing_completion(
 ) -> Result<ContentDescriptor, ContentVaultError> {
     let response = serde_json::to_value(&descriptor).map_err(|_| ContentVaultError::database())?;
     let inserted = insert_receipt(
-        transaction.sql(),
+        &mut transaction,
         scope,
         idempotency_key,
         grant.tenant_id(),
@@ -1330,7 +1346,7 @@ async fn finish_existing_completion(
     .await?;
     if !inserted {
         let existing = receipt_in_tx::<ContentDescriptor>(
-            transaction.sql(),
+            &mut transaction,
             scope,
             idempotency_key,
             expected_digest,
@@ -1350,7 +1366,7 @@ async fn finish_existing_completion(
 }
 
 async fn descriptor_for_session_owner_tx(
-    transaction: &mut DbTransaction<'_>,
+    transaction: &mut Transaction<'_, Postgres>,
     grant: &OwnerGrant,
     session_id: UploadSessionId,
 ) -> Result<ContentDescriptor, ContentVaultError> {
@@ -1383,7 +1399,7 @@ async fn descriptor_for_session_owner_tx(
 
 #[allow(clippy::too_many_arguments)]
 async fn insert_receipt(
-    transaction: &mut DbTransaction<'_>,
+    transaction: &mut Transaction<'_, Postgres>,
     scope: &str,
     idempotency_key: &str,
     tenant_id: &str,
@@ -1412,7 +1428,7 @@ async fn insert_receipt(
 }
 
 async fn receipt_in_tx<T: DeserializeOwned>(
-    transaction: &mut DbTransaction<'_>,
+    transaction: &mut Transaction<'_, Postgres>,
     scope: &str,
     idempotency_key: &str,
     expected_digest: &str,
@@ -1572,4 +1588,27 @@ struct SweepRow {
     object_kind: String,
     object_id: Uuid,
     quarantine_key: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_sweep_timestamp_subtraction_is_bounded_without_panicking() {
+        let now = DateTime::parse_from_rfc3339("2026-08-30T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let one_year = Duration::seconds(31_536_000);
+        let cutoff = checked_timestamp_sub(now, one_year).unwrap();
+        assert_eq!(now - cutoff, one_year);
+
+        let error = checked_timestamp_sub(DateTime::<Utc>::MIN_UTC, Duration::seconds(1))
+            .expect_err("timestamp underflow must fail closed instead of panicking");
+        assert_eq!(error.code(), ContentVaultErrorCode::InvalidInput);
+        assert_eq!(
+            error.message(),
+            "sweep grace exceeds the supported timestamp range"
+        );
+    }
 }

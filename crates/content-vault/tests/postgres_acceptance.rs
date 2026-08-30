@@ -1,13 +1,14 @@
 #![cfg(feature = "postgres-acceptance")]
 
+use crate::module::capability_descriptor;
+use crate::test_support::{
+    CONTENT_VAULT_MIGRATIONS, CompleteUploadRequest, ContentClaimRole, ContentDescriptor,
+    ContentId, ContentVault, ContentVaultConfig, ContentVaultErrorCode, ImmutablePut, OwnerGrant,
+    OwnerRef, ProtectedStore, QuarantineStore, ReserveUploadRequest, StageOutcome, StoreError,
+    StoreErrorKind, UploadSession,
+};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use content_vault::migrations::CONTENT_VAULT_MIGRATIONS;
-use content_vault::{
-    CompleteUploadRequest, ContentClaimRole, ContentDescriptor, ContentId, ContentVault,
-    ContentVaultConfig, ContentVaultErrorCode, ImmutablePut, OwnerGrant, OwnerRef, ProtectedStore,
-    QuarantineStore, ReserveUploadRequest, StageOutcome, StoreError, StoreErrorKind, UploadSession,
-};
 use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::{HashMap, HashSet};
@@ -206,7 +207,7 @@ impl Fixture {
             .await
             .unwrap();
         for migration in CONTENT_VAULT_MIGRATIONS {
-            sqlx::raw_sql(migration.sql).execute(&pool).await.unwrap();
+            sqlx::raw_sql(migration.sql()).execute(&pool).await.unwrap();
         }
 
         let quarantine = Arc::new(MemoryQuarantine::default());
@@ -269,6 +270,7 @@ impl Fixture {
 #[allow(clippy::too_many_lines)]
 async fn content_vault_v1_black_box_acceptance() {
     let fixture = Fixture::new().await;
+    outbound_projection_rejection_acceptance(&fixture).await;
     cleanup_failure_does_not_starve_later_keys(&fixture).await;
     let source = owner("tenant-a", "profile", "avatar", "source");
     let bytes = b"hello from the content vault".to_vec();
@@ -440,6 +442,79 @@ async fn content_vault_v1_black_box_acceptance() {
     bounded_expiration_acceptance(&fixture).await;
     staging_lease_acceptance(&fixture).await;
     stale_staging_eventual_cleanup_acceptance(&fixture).await;
+}
+
+async fn outbound_projection_rejection_acceptance(fixture: &Fixture) {
+    use chrono::TimeZone as _;
+
+    let grant = owner("tenant-a", "projection", "row", "invalid-outbound");
+    let blob_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO content_vault.blobs \
+         (blob_id, tenant_id, sha256, size_bytes, media_type, protected_key, created_at) \
+         VALUES ($1, $2, $3, 1, 'text/plain', $4, now())",
+    )
+    .bind(blob_id)
+    .bind(grant.tenant_id())
+    .bind("d".repeat(64))
+    .bind("acceptance/projection/blob")
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    for (case, content_id, created_at) in [
+        (
+            "nil UUID",
+            Uuid::nil(),
+            Utc.with_ymd_and_hms(2026, 8, 30, 0, 0, 0).unwrap(),
+        ),
+        (
+            "extended-year timestamp",
+            Uuid::now_v7(),
+            Utc.with_ymd_and_hms(10_000, 1, 1, 0, 0, 0).unwrap(),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO content_vault.content_objects \
+             (content_id, tenant_id, blob_id, committed_by_owner_module, \
+              committed_by_owner_resource_type, committed_by_owner_resource_id, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(content_id)
+        .bind(grant.tenant_id())
+        .bind(blob_id)
+        .bind(grant.owner().module())
+        .bind(grant.owner().resource_type())
+        .bind(grant.owner().resource_id())
+        .bind(created_at)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO content_vault.content_claims \
+             (claim_id, tenant_id, content_id, owner_module, owner_resource_type, \
+              owner_resource_id, owner_revision_id, role, state, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, '', 'source', 'active', now())",
+        )
+        .bind(Uuid::now_v7())
+        .bind(grant.tenant_id())
+        .bind(content_id)
+        .bind(grant.owner().module())
+        .bind(grant.owner().resource_type())
+        .bind(grant.owner().resource_id())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        let descriptor = fixture
+            .vault
+            .describe_content(&grant, ContentId::from_uuid(content_id))
+            .await
+            .unwrap();
+        assert!(
+            capability_descriptor(&descriptor).is_err(),
+            "{case} must fail before a Capability wire value is emitted"
+        );
+    }
 }
 
 async fn cleanup_failure_does_not_starve_later_keys(fixture: &Fixture) {

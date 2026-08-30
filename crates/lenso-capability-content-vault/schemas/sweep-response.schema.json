@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["expired_sessions", "cleaned_objects", "failed_objects"],
+  "properties": {
+    "expired_sessions": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+    },
+    "cleaned_objects": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+    },
+    "failed_objects": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+    }
+  },
+  "additionalProperties": false,
+  "title": "SweepResponse"
+}

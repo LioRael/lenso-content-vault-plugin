@@ -1,0 +1,37 @@
+[package]
+name = "lenso-capability-content-vault"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Portable Content Vault Capability contract for Lenso applications."
+build = "build.rs"
+
+[package.metadata.lenso.contract]
+descriptor = "capability.json"
+projection = "rust"
+output = "src/generated.rs"
+
+[dependencies]
+futures.workspace = true
+lenso-contract-authoring.workspace = true
+lenso-contract-runtime.workspace = true
+lenso-kernel.workspace = true
+lenso-plugin-authoring.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+lenso-contract-authoring.workspace = true
+lenso-contract-codegen.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+lenso-contract-codegen.workspace = true
+
+[lints]
+workspace = true

@@ -2,14 +2,13 @@
 
 ## Decision
 
-Content Vault is a linked Rust Lenso Module because it owns a cohesive, durable business lifecycle: untrusted upload reservation, quarantine, validation, immutable commit, content identity, owner claims, integrity evidence, and safe cleanup. An S3 adapter alone would be infrastructure, not a Module.
+Content Vault is a removable Lenso Plugin because it owns a cohesive, durable business lifecycle: untrusted upload reservation, quarantine, validation, immutable commit, content identity, owner claims, integrity evidence, and safe cleanup. An S3 adapter alone would be infrastructure, not a Plugin.
 
-The consuming Module continues to own domain objects, domain metadata, authorization decisions, and HTTP routes. Content Vault receives only a mandatory tenant plus an opaque owner reference. It never reads a consumer's private tables and it contains no consumer-specific vocabulary.
+The consuming Plugin continues to own domain objects, domain metadata, authorization decisions, and HTTP routes. Content Vault receives only a mandatory tenant plus an opaque owner reference. It never reads a consumer's private tables and it contains no consumer-specific vocabulary.
 
-The V1 transport boundary is a complete in-memory byte buffer with a default
-64 MiB limit. Streaming and multipart ingestion are intentionally outside this
-revision; an owner with a larger contract must not silently route those objects
-through V1.
+`lenso.content-vault@1` exposes reservation plus bounded resumable upload and
+verified download Streams. The lower-level engine retains its bounded buffered
+path for internal acceptance, but it is not the Plugin consumer Contract.
 
 ## Authority
 
@@ -26,16 +25,36 @@ The object store is authoritative only for bytes. A staged object is an observat
 
 ## Public seam
 
-The Rust API is the authoritative V1 surface:
+The generated `lenso.content-vault@1` Capability is the authoritative V1
+consumer surface: `reserve`, `upload`, `describe`, `download`, `claim`,
+`release_claim`, and explicit `sweep`. Owner calls require the exact
+Kernel-resolved caller Instance to match the opaque owner grant. `sweep` also
+requires an exact configured maintenance caller; a Capability binding alone
+does not grant maintenance authority.
 
-1. `reserve_upload` creates an idempotent reservation.
-2. `stage_upload` writes bytes to its private quarantine key.
-3. `complete_upload` validates and promotes bytes, then returns an opaque `ContentId`.
-4. `describe_content` and `read_content` require the exact tenant and active owner claim.
-5. `claim_content_in_tx` and `release_claim_in_tx` compose claim changes with an owner Module transaction.
-6. `sweep_terminal_quarantine` repeatedly deletes only exact quarantine keys whose terminal state and grace period are proven by PostgreSQL. Attempt and success timestamps are observations, never permanent reachability claims; every attempt rotates to the back of the bounded queue, so failures do not starve other keys and a delayed object-store write is removed by a later pass.
+All portable string, UUID, digest, timestamp, byte-frame, offset, size, TTL,
+and maintenance-count edges are bounded in generated JSON Schemas and checked
+again by the native provider. Stream messages carry at most one encoded 8 MiB
+chunk; legacy buffered content is segmented without changing byte order or
+offset semantics.
 
-There is no generic product HTTP route. An owner Module may wrap this API after doing its own business authorization.
+The old linked Rust seam could compose a claim mutation with an owner component's
+database transaction. A cross-Plugin Capability call cannot share that
+transaction. Claim operations now commit in Vault-owned transactions, and
+consumers use idempotency plus compensation or a future explicit Workflow for
+multi-Plugin outcomes.
+
+There is no generic product HTTP route. An owner Plugin may wrap the Capability
+after doing its own business authorization.
+
+Production Rust consumers cannot bypass Kernel authority through the old
+engine, storage, migration, pool, or transaction types. Those seams are private
+under every Cargo feature combination; acceptance suites compile only inside
+the crate's test target. Schema setup, upgrade, and exact legacy adoption remain
+deployment-operator actions. Legacy adoption requires an offline maintenance
+window with all DDL-capable owner sessions stopped; its table locks cannot
+prevent same-owner concurrent object creation. Runtime connect repeats the
+exact catalog proof and fails closed on objects added after adoption.
 
 Idempotency identity is the operation, tenant, complete opaque owner reference, and key. Actor and correlation values are first-attempt audit metadata; a legitimate retry may be reconstructed under a different actor or correlation without creating a second reservation.
 
@@ -66,11 +85,13 @@ Idempotency identity is the operation, tenant, complete opaque owner reference, 
 ## Deferred
 
 - Signed direct-upload tickets and a generic upload transport.
-- Cross-Module claim transfer protocol.
+- Cross-Plugin claim transfer protocol.
 - Retention policies and protected-content deletion.
 - Malware scanning and additional media validators.
-- Console surfaces, runtime scheduling, and public events.
+- Console surfaces and public events.
+- A selected durable Scheduler/Jobs/Workflow integration for sweep cadence.
 
-Runtime scheduling remains deferred specifically because Lenso's public facade does not yet expose the behavior-binding types required by an external linked Module. Until that public seam exists, consumers invoke the bounded sweeper from a host-owned maintenance hook; the manifest does not declare behavior that cannot be registered.
-
-These require real consumers and independently reviewed contracts before they enter the manifest.
+The bounded sweep remains an explicit operation. Content Vault does not recreate
+the retired generic cron runtime or claim that a volatile Kernel task is a
+durable scheduler. These additions require real consumers and independently
+reviewed contracts.

@@ -1,15 +1,20 @@
 [package]
-name = "lenso-module-content-vault"
+name = "lenso-content-vault-plugin"
 version = "0.1.0"
+autotests = false
 edition.workspace = true
 license.workspace = true
-description = "First-party immutable content vault Module for the Lenso backend framework."
+description = "PostgreSQL and object-store Content Vault Plugin for Lenso applications."
 repository = "https://github.com/LioRael/lenso-content-vault-plugin"
 homepage = "https://github.com/LioRael/lenso-content-vault-plugin"
 readme = "../../README.md"
 categories = ["web-programming", "development-tools"]
 keywords = ["backend", "framework", "upload", "content-addressed"]
 rust-version.workspace = true
+
+[package.metadata.lenso]
+plugin-id = "lenso.content-vault"
+root-slot = "content-vault"
 
 [lib]
 name = "content_vault"
@@ -18,30 +23,37 @@ path = "src/lib.rs"
 [features]
 default = []
 postgres-acceptance = []
-s3-acceptance = ["s3"]
-s3 = ["object_store/aws"]
+s3-acceptance = []
 
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 futures.workspace = true
 hex.workspace = true
 image.workspace = true
 lenso.workspace = true
-object_store.workspace = true
+lenso-capability-content-vault = { path = "../lenso-capability-content-vault", version = "0.1.0" }
+lenso-capability-secrets.workspace = true
+lenso-postgres-kit.workspace = true
+object_store = { workspace = true, features = ["aws"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+url.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-lenso-bootstrap = "0.1.34"
-platform-core = { package = "lenso-platform-core", version = "0.1.25" }
+lenso-app-plan.workspace = true
+lenso-kernel.workspace = true
+lenso-native-adapter.workspace = true
+lenso-test.workspace = true
 
 [lints]
 workspace = true

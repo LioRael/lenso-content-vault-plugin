@@ -1,0 +1,57 @@
+{
+  "id": "lenso.content-vault@1",
+  "version": "1.0.0",
+  "portable": true,
+  "cross_lane_transfer": false,
+  "operations": [
+    {
+      "name": "reserve",
+      "interaction": "request",
+      "request_schema": "schemas/reserve-request.schema.json",
+      "response_schema": "schemas/reserve-response.schema.json",
+      "domain_error_schema": "schemas/reserve-error.schema.json"
+    },
+    {
+      "name": "describe",
+      "interaction": "request",
+      "request_schema": "schemas/describe-request.schema.json",
+      "response_schema": "schemas/describe-response.schema.json",
+      "domain_error_schema": "schemas/describe-error.schema.json"
+    },
+    {
+      "name": "claim",
+      "interaction": "request",
+      "request_schema": "schemas/claim-request.schema.json",
+      "response_schema": "schemas/claim-response.schema.json",
+      "domain_error_schema": "schemas/claim-error.schema.json"
+    },
+    {
+      "name": "release_claim",
+      "interaction": "request",
+      "request_schema": "schemas/release-claim-request.schema.json",
+      "response_schema": "schemas/release-claim-response.schema.json",
+      "domain_error_schema": "schemas/release-claim-error.schema.json"
+    },
+    {
+      "name": "sweep",
+      "interaction": "request",
+      "request_schema": "schemas/sweep-request.schema.json",
+      "response_schema": "schemas/sweep-response.schema.json",
+      "domain_error_schema": "schemas/sweep-error.schema.json"
+    },
+    {
+      "name": "upload",
+      "interaction": "stream",
+      "request_schema": "schemas/upload-open.schema.json",
+      "response_schema": "schemas/upload-message.schema.json",
+      "domain_error_schema": "schemas/upload-error.schema.json"
+    },
+    {
+      "name": "download",
+      "interaction": "stream",
+      "request_schema": "schemas/download-open.schema.json",
+      "response_schema": "schemas/download-message.schema.json",
+      "domain_error_schema": "schemas/download-error.schema.json"
+    }
+  ]
+}
