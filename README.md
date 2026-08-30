@@ -98,8 +98,9 @@ not a durable schema mutation.
 Exact legacy Host deployments are adopted explicitly with
 `adopt_legacy_v1` or `adopt_legacy_current`. Adoption also verifies the old
 `platform.schema_migrations` provenance, preserves rows, and atomically creates
-the checksum ledger. It is a mandatory offline maintenance operation: stop all
-writers and every DDL-capable session for the database owner before the call.
+the checksum ledger. Run `upgrade` after either adoption call to apply later
+Plugin-owned migrations. Adoption is a mandatory offline maintenance operation:
+stop all writers and every DDL-capable session for the database owner before the call.
 Its `SHARE`/`ACCESS EXCLUSIVE` locks stabilize the legacy ledger and existing
 tables, but PostgreSQL provides no ordinary schema lock that can prevent the
 same owner from concurrently creating a new object. Runtime `prepare` never

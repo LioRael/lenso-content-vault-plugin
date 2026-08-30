@@ -151,7 +151,7 @@ impl ContentVaultOperator {
             PgPoolOptions::new().max_connections(10),
         )
         .await?;
-        if let Err(error) = verify_managed_catalog(postgres.pool(), SchemaVersion::V2).await {
+        if let Err(error) = verify_managed_catalog(postgres.pool(), SchemaVersion::V3).await {
             postgres.pool().close().await;
             return Err(error);
         }
@@ -168,21 +168,31 @@ impl ContentVaultOperator {
         Ok(outcome)
     }
 
-    /// Applies pending migrations only after the managed current/V1 catalog is exact.
+    /// Applies pending migrations only after the managed current/V1/V2 catalog is exact.
     pub async fn upgrade(database_url: &str) -> Result<UpgradeOutcome, ContentVaultOperatorError> {
         match OwnedPostgres::prepare(database_url, schema_plan()?).await {
             Ok(postgres) => {
-                verify_managed_catalog(postgres.pool(), SchemaVersion::V2).await?;
+                verify_managed_catalog(postgres.pool(), SchemaVersion::V3).await?;
                 postgres.pool().close().await;
-                return Ok(UpgradeOutcome::AlreadyCurrent { version: 2 });
+                return Ok(UpgradeOutcome::AlreadyCurrent { version: 3 });
             }
             Err(PostgresKitError::UpgradeRequired {
                 current: 1,
-                expected: 2,
+                expected: 3,
                 ..
             }) => {
                 let pool = connect_unchecked(database_url).await?;
                 let verification = verify_managed_catalog(&pool, SchemaVersion::V1).await;
+                pool.close().await;
+                verification?;
+            }
+            Err(PostgresKitError::UpgradeRequired {
+                current: 2,
+                expected: 3,
+                ..
+            }) => {
+                let pool = connect_unchecked(database_url).await?;
+                let verification = verify_managed_catalog(&pool, SchemaVersion::V2).await;
                 pool.close().await;
                 verification?;
             }
@@ -214,8 +224,9 @@ impl ContentVaultOperator {
 
     /// One-time adoption of the exact legacy current (V2) schema and Host provenance.
     ///
-    /// This preserves all rows and atomically records both immutable migrations in the
-    /// Plugin-owned checksum ledger. It has the same mandatory offline DDL boundary as
+    /// This preserves all rows and atomically records both historical migrations in the
+    /// Plugin-owned checksum ledger. The operator must then call [`Self::upgrade`] explicitly
+    /// to apply Plugin-owned migrations. Adoption has the same mandatory offline DDL boundary as
     /// [`Self::adopt_legacy_v1`].
     pub async fn adopt_legacy_current(
         database_url: &str,
@@ -261,6 +272,7 @@ pub enum ContentVaultOperatorError {
 enum SchemaVersion {
     V1,
     V2,
+    V3,
 }
 
 impl SchemaVersion {
@@ -268,13 +280,15 @@ impl SchemaVersion {
         match self {
             Self::V1 => 1,
             Self::V2 => 2,
+            Self::V3 => 3,
         }
     }
 
-    const fn legacy_host_migrations(self) -> &'static [&'static str] {
+    const fn legacy_host_migrations(self) -> Option<&'static [&'static str]> {
         match self {
-            Self::V1 => LEGACY_V1_HOST_MIGRATIONS,
-            Self::V2 => LEGACY_CURRENT_HOST_MIGRATIONS,
+            Self::V1 => Some(LEGACY_V1_HOST_MIGRATIONS),
+            Self::V2 => Some(LEGACY_CURRENT_HOST_MIGRATIONS),
+            Self::V3 => None,
         }
     }
 }
@@ -360,7 +374,7 @@ async fn lock_legacy_catalog(
              content_vault.command_receipts, content_vault.integrity_observations \
              IN ACCESS EXCLUSIVE MODE"
         }
-        SchemaVersion::V2 => {
+        SchemaVersion::V2 | SchemaVersion::V3 => {
             "LOCK TABLE content_vault.upload_sessions, content_vault.blobs, \
              content_vault.content_objects, content_vault.content_claims, \
              content_vault.command_receipts, content_vault.integrity_observations, \
@@ -784,6 +798,7 @@ async fn legacy_host_history_matches(
     .await?;
     let expected_names = version
         .legacy_host_migrations()
+        .expect("legacy adoption only accepts historical Host schema versions")
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
@@ -1434,7 +1449,7 @@ mod tests {
 
     #[test]
     fn operator_keeps_historical_migration_order_and_names() {
-        assert_eq!(CONTENT_VAULT_MIGRATIONS.len(), 2);
+        assert_eq!(CONTENT_VAULT_MIGRATIONS.len(), 3);
         assert_eq!(CONTENT_VAULT_MIGRATIONS[0].version(), 1);
         assert_eq!(
             CONTENT_VAULT_MIGRATIONS[0].name(),
@@ -1442,6 +1457,11 @@ mod tests {
         );
         assert_eq!(CONTENT_VAULT_MIGRATIONS[1].version(), 2);
         assert_eq!(CONTENT_VAULT_MIGRATIONS[1].name(), "add-streaming-io");
+        assert_eq!(CONTENT_VAULT_MIGRATIONS[2].version(), 3);
+        assert_eq!(
+            CONTENT_VAULT_MIGRATIONS[2].name(),
+            "make-pending-quarantine-cleanup-crash-safe"
+        );
     }
 
     #[test]

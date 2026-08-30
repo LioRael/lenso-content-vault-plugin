@@ -11,6 +11,11 @@ pub const CONTENT_VAULT_MIGRATIONS: &[Migration] = sql_migrations![
         "migrations/0001_create_content_vault_schema.sql"
     ),
     (2, "add-streaming-io", "migrations/0002_streaming_io.sql"),
+    (
+        3,
+        "make-pending-quarantine-cleanup-crash-safe",
+        "migrations/0003_pending_quarantine_cleanup_indexes.sql"
+    ),
 ];
 
 pub(crate) fn schema_plan() -> Result<SchemaPlan, PlanError> {

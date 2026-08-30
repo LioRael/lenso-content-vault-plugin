@@ -12,7 +12,10 @@ use chrono::{Duration, Utc};
 use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use uuid::Uuid;
 
 const ACCEPTANCE_LOCK_ID: i64 = 0x434F_4E54_5641_554C;
@@ -23,6 +26,8 @@ struct MemoryQuarantine {
     fail_delete: Mutex<bool>,
     fail_delete_once_keys: Mutex<HashSet<String>>,
     put_gate: Mutex<Option<PutGate>>,
+    fail_after_put_once: AtomicBool,
+    delete_calls: AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -65,8 +70,16 @@ impl MemoryQuarantine {
         (entered, release)
     }
 
+    fn fail_after_next_put(&self) {
+        self.fail_after_put_once.store(true, Ordering::Relaxed);
+    }
+
     fn force_put(&self, key: &str, bytes: Vec<u8>) {
         self.objects.lock().unwrap().insert(key.to_owned(), bytes);
+    }
+
+    fn delete_calls(&self) -> usize {
+        self.delete_calls.load(Ordering::Relaxed)
     }
 }
 
@@ -91,12 +104,20 @@ impl QuarantineStore for MemoryQuarantine {
             )),
             None => {
                 objects.insert(key.to_owned(), bytes);
-                Ok(ImmutablePut::Created)
+                if self.fail_after_put_once.swap(false, Ordering::Relaxed) {
+                    Err(StoreError::new(
+                        StoreErrorKind::Unavailable,
+                        "injected uncertain quarantine put failure",
+                    ))
+                } else {
+                    Ok(ImmutablePut::Created)
+                }
             }
         }
     }
 
     async fn delete_exact(&self, key: &str) -> Result<(), StoreError> {
+        self.delete_calls.fetch_add(1, Ordering::Relaxed);
         if *self.fail_delete.lock().unwrap()
             || self.fail_delete_once_keys.lock().unwrap().remove(key)
         {
@@ -272,6 +293,7 @@ async fn content_vault_v1_black_box_acceptance() {
     let fixture = Fixture::new().await;
     outbound_projection_rejection_acceptance(&fixture).await;
     cleanup_failure_does_not_starve_later_keys(&fixture).await;
+    successful_session_and_part_cleanup_are_not_repeated(&fixture).await;
     let source = owner("tenant-a", "profile", "avatar", "source");
     let bytes = b"hello from the content vault".to_vec();
     let reserve = ReserveUploadRequest::new(
@@ -442,6 +464,76 @@ async fn content_vault_v1_black_box_acceptance() {
     bounded_expiration_acceptance(&fixture).await;
     staging_lease_acceptance(&fixture).await;
     stale_staging_eventual_cleanup_acceptance(&fixture).await;
+    uncertain_staging_put_eventual_cleanup_acceptance(&fixture).await;
+}
+
+async fn successful_session_and_part_cleanup_are_not_repeated(fixture: &Fixture) {
+    let cleanup_owner = owner("tenant-a", "documents", "file", "cleanup-once");
+    let session_bytes = b"cleanup session once bytes";
+    let part_bytes = b"cleanup part once bytes";
+    let (session, _) = fixture
+        .upload(&cleanup_owner, session_bytes, "cleanup-once")
+        .await;
+    let part_id = Uuid::now_v7();
+    let part_key = format!("content-vault/test/quarantine/{part_id}");
+    let created_at = Utc::now() - Duration::seconds(1);
+    sqlx::query(
+        "INSERT INTO content_vault.upload_parts (\
+             part_id, session_id, part_index, byte_offset, size_bytes, sha256, \
+             quarantine_key, attempt_token, state, writer_resolved_at, created_at, updated_at\
+         ) VALUES ($1, $2, 0, 0, NULL, NULL, $3, $4, 'abandoned', $5, $5, $5)",
+    )
+    .bind(part_id)
+    .bind(session.session_id().as_uuid())
+    .bind(&part_key)
+    .bind(Uuid::now_v7())
+    .bind(created_at)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    fixture.quarantine.force_put(&part_key, part_bytes.to_vec());
+    let delete_calls_before = fixture.quarantine.delete_calls();
+
+    let first = fixture
+        .vault
+        .sweep_terminal_quarantine_at(Utc::now() + Duration::seconds(1), Duration::zero(), 100)
+        .await
+        .unwrap();
+    assert_eq!(first.cleaned_objects, 2);
+    assert_eq!(fixture.quarantine.delete_calls(), delete_calls_before + 2);
+    let (session_attempts_after_first, part_attempts_after_first): (i64, i64) = sqlx::query_as(
+        "SELECT sessions.quarantine_cleanup_attempts, parts.quarantine_cleanup_attempts \
+         FROM content_vault.upload_sessions AS sessions \
+         JOIN content_vault.upload_parts AS parts ON parts.session_id = sessions.session_id \
+         WHERE sessions.session_id = $1 AND parts.part_id = $2",
+    )
+    .bind(session.session_id().as_uuid())
+    .bind(part_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+
+    let second = fixture
+        .vault
+        .sweep_terminal_quarantine_at(Utc::now() + Duration::seconds(2), Duration::zero(), 100)
+        .await
+        .unwrap();
+    assert_eq!(second.cleaned_objects, 0);
+    assert_eq!(second.failed_objects, 0);
+    assert_eq!(fixture.quarantine.delete_calls(), delete_calls_before + 2);
+    let (session_attempts_after_second, part_attempts_after_second): (i64, i64) = sqlx::query_as(
+        "SELECT sessions.quarantine_cleanup_attempts, parts.quarantine_cleanup_attempts \
+         FROM content_vault.upload_sessions AS sessions \
+         JOIN content_vault.upload_parts AS parts ON parts.session_id = sessions.session_id \
+         WHERE sessions.session_id = $1 AND parts.part_id = $2",
+    )
+    .bind(session.session_id().as_uuid())
+    .bind(part_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(session_attempts_after_second, session_attempts_after_first);
+    assert_eq!(part_attempts_after_second, part_attempts_after_first);
 }
 
 async fn outbound_projection_rejection_acceptance(fixture: &Fixture) {
@@ -574,13 +666,14 @@ async fn staging_lease_acceptance(fixture: &Fixture) {
         )
         .await
         .unwrap();
+    let session_id = session.session_id();
     let (entered, release) = fixture.quarantine.gate_next_put();
     let vault = fixture.vault.clone();
     let staging_grant = grant.clone();
     let staging_bytes = bytes.clone();
     let staging = tokio::spawn(async move {
         vault
-            .stage_upload(&staging_grant, session.session_id(), staging_bytes)
+            .stage_upload(&staging_grant, session_id, staging_bytes)
             .await
     });
     entered.notified().await;
@@ -620,24 +713,29 @@ async fn stale_staging_eventual_cleanup_acceptance(fixture: &Fixture) {
         )
         .await
         .unwrap();
-    let quarantine_key: String = sqlx::query_scalar(
-        "SELECT quarantine_key FROM content_vault.upload_sessions WHERE session_id = $1",
-    )
-    .bind(session.session_id().as_uuid())
-    .fetch_one(&fixture.pool)
-    .await
-    .unwrap();
+    let session_id = session.session_id();
+    let (entered, release) = fixture.quarantine.gate_next_put();
+    let vault = fixture.vault.clone();
+    let staging_grant = grant.clone();
+    let staging_bytes = bytes.clone();
+    let staging = tokio::spawn(async move {
+        vault
+            .stage_upload(&staging_grant, session_id, staging_bytes)
+            .await
+    });
+    entered.notified().await;
     sqlx::query(
         "UPDATE content_vault.upload_sessions \
-         SET state = 'staging', staging_started_at = $1, updated_at = $1 \
+         SET staging_started_at = $1, updated_at = $1 \
          WHERE session_id = $2",
     )
     .bind(Utc::now() - Duration::seconds(1_000))
-    .bind(session.session_id().as_uuid())
+    .bind(session_id.as_uuid())
     .execute(&fixture.pool)
     .await
     .unwrap();
 
+    let delete_calls_before = fixture.quarantine.delete_calls();
     let terminal_time = Utc::now() + Duration::seconds(2);
     let first_sweep = fixture
         .vault
@@ -645,8 +743,93 @@ async fn stale_staging_eventual_cleanup_acceptance(fixture: &Fixture) {
         .await
         .unwrap();
     assert!(first_sweep.expired_sessions >= 1);
-    fixture.quarantine.force_put(&quarantine_key, bytes.clone());
-    assert!(fixture.quarantine.contains_value(&bytes));
+    assert_eq!(fixture.quarantine.delete_calls(), delete_calls_before + 1);
+
+    release.notify_one();
+    let staging_error = staging
+        .await
+        .unwrap()
+        .expect_err("expired staging writer must be fenced during reconciliation");
+    assert_eq!(staging_error.code(), ContentVaultErrorCode::Conflict);
+    assert!(!fixture.quarantine.contains_value(&bytes));
+    assert_eq!(fixture.quarantine.delete_calls(), delete_calls_before + 2);
+
+    let delete_calls_after_late_write = fixture.quarantine.delete_calls();
+    let second_sweep = fixture
+        .vault
+        .sweep_terminal_quarantine_at(
+            terminal_time + Duration::seconds(1),
+            Duration::zero(),
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_sweep.cleaned_objects, 0);
+    assert_eq!(second_sweep.failed_objects, 0);
+    assert_eq!(
+        fixture.quarantine.delete_calls(),
+        delete_calls_after_late_write
+    );
+}
+
+async fn uncertain_staging_put_eventual_cleanup_acceptance(fixture: &Fixture) {
+    let grant = owner("tenant-a", "documents", "file", "uncertain-zombie-stage");
+    let bytes = b"uncertain zombie staging bytes".to_vec();
+    let session = fixture
+        .vault
+        .reserve_upload(
+            &grant,
+            &ReserveUploadRequest::new(
+                "uncertain-zombie-stage-reserve",
+                sha256(&bytes),
+                bytes.len() as u64,
+                "text/plain",
+                1,
+            ),
+        )
+        .await
+        .unwrap();
+    let session_id = session.session_id();
+    fixture.quarantine.fail_after_next_put();
+    let (entered, release) = fixture.quarantine.gate_next_put();
+    let vault = fixture.vault.clone();
+    let staging_grant = grant.clone();
+    let staging_bytes = bytes.clone();
+    let staging = tokio::spawn(async move {
+        vault
+            .stage_upload(&staging_grant, session_id, staging_bytes)
+            .await
+    });
+    entered.notified().await;
+    sqlx::query(
+        "UPDATE content_vault.upload_sessions \
+         SET staging_started_at = $1, updated_at = $1 \
+         WHERE session_id = $2",
+    )
+    .bind(Utc::now() - Duration::seconds(1_000))
+    .bind(session_id.as_uuid())
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    let delete_calls_before = fixture.quarantine.delete_calls();
+    let terminal_time = Utc::now() + Duration::seconds(2);
+    let first_sweep = fixture
+        .vault
+        .sweep_terminal_quarantine_at(terminal_time, Duration::zero(), 1_000)
+        .await
+        .unwrap();
+    assert!(first_sweep.expired_sessions >= 1);
+    assert_eq!(fixture.quarantine.delete_calls(), delete_calls_before + 1);
+
+    release.notify_one();
+    let staging_error = staging
+        .await
+        .unwrap()
+        .expect_err("an uncertain expired staging writer must be fenced during reconciliation");
+    assert_eq!(staging_error.code(), ContentVaultErrorCode::Conflict);
+    assert!(!fixture.quarantine.contains_value(&bytes));
+    assert_eq!(fixture.quarantine.delete_calls(), delete_calls_before + 2);
 
     let second_sweep = fixture
         .vault
@@ -657,8 +840,9 @@ async fn stale_staging_eventual_cleanup_acceptance(fixture: &Fixture) {
         )
         .await
         .unwrap();
-    assert!(second_sweep.cleaned_objects >= 1);
-    assert!(!fixture.quarantine.contains_value(&bytes));
+    assert_eq!(second_sweep.cleaned_objects, 0);
+    assert_eq!(second_sweep.failed_objects, 0);
+    assert_eq!(fixture.quarantine.delete_calls(), delete_calls_before + 2);
 }
 
 async fn claim_transaction_acceptance(

@@ -45,13 +45,13 @@ async fn operator_is_exact_read_only_at_runtime_and_adopts_legacy_data_fail_clos
     assert_eq!(
         ContentVaultOperator::setup(&database_url).await.unwrap(),
         SetupOutcome::Created {
-            version: 2,
-            applied: 2
+            version: 3,
+            applied: 3
         }
     );
     assert_eq!(
         ContentVaultOperator::setup(&database_url).await.unwrap(),
-        SetupOutcome::AlreadyCurrent { version: 2 }
+        SetupOutcome::AlreadyCurrent { version: 3 }
     );
     ContentVaultOperator::connect(&database_url)
         .await
@@ -107,7 +107,7 @@ async fn operator_is_exact_read_only_at_runtime_and_adopts_legacy_data_fail_clos
         .await
         .unwrap();
     sqlx::query(
-        "UPDATE content_vault._lenso_schema_migrations SET checksum = 'tampered' WHERE version = 2",
+        "UPDATE content_vault._lenso_schema_migrations SET checksum = 'tampered' WHERE version = 3",
     )
     .execute(&pool)
     .await
@@ -115,7 +115,7 @@ async fn operator_is_exact_read_only_at_runtime_and_adopts_legacy_data_fail_clos
     assert!(matches!(
         ContentVaultOperator::connect(&database_url).await,
         Err(ContentVaultOperatorError::Postgres(
-            PostgresKitError::HistoryDiverged { version: 2, .. }
+            PostgresKitError::HistoryDiverged { version: 3, .. }
         ))
     ));
 
@@ -140,7 +140,7 @@ async fn operator_is_exact_read_only_at_runtime_and_adopts_legacy_data_fail_clos
         Err(ContentVaultOperatorError::Postgres(
             PostgresKitError::UpgradeRequired {
                 current: 1,
-                expected: 2,
+                expected: 3,
                 ..
             }
         ))
@@ -149,8 +149,8 @@ async fn operator_is_exact_read_only_at_runtime_and_adopts_legacy_data_fail_clos
         ContentVaultOperator::upgrade(&database_url).await.unwrap(),
         UpgradeOutcome::Applied {
             from: 1,
-            to: 2,
-            applied: 1
+            to: 3,
+            applied: 2
         }
     );
     assert!(sentinel_exists(&pool, "legacy-v1").await);
@@ -172,6 +172,24 @@ async fn operator_is_exact_read_only_at_runtime_and_adopts_legacy_data_fail_clos
     );
     assert!(sentinel_exists(&pool, "legacy-v2").await);
     assert!(legacy_unrelated_row_exists(&pool).await);
+    assert!(matches!(
+        ContentVaultOperator::connect(&database_url).await,
+        Err(ContentVaultOperatorError::Postgres(
+            PostgresKitError::UpgradeRequired {
+                current: 2,
+                expected: 3,
+                ..
+            }
+        ))
+    ));
+    assert_eq!(
+        ContentVaultOperator::upgrade(&database_url).await.unwrap(),
+        UpgradeOutcome::Applied {
+            from: 2,
+            to: 3,
+            applied: 1
+        }
+    );
     ContentVaultOperator::connect(&database_url)
         .await
         .unwrap()

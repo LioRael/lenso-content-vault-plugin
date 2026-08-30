@@ -7,7 +7,7 @@ use crate::public::{
     ContentClaimRole, ContentDescriptor, ContentId, OwnerGrant, ReserveUploadRequest,
     UploadSession, UploadSessionId, validate_idempotency_key,
 };
-use crate::storage::StoreByteStream;
+use crate::storage::{STREAMING_ATTEMPT_PREFIX, StoreByteStream};
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Duration, Utc};
 use futures::{StreamExt, TryStreamExt};
@@ -688,13 +688,16 @@ impl ContentVault {
         };
         let part_sha256 = sha256_hex(&bytes);
         if let Err(error) = self.quarantine.put_immutable(&part_key, bytes).await {
-            self.abandon_streaming_part(part_id).await;
-            return Err(map_store_error(&error));
+            let put_error = map_store_error(&error);
+            self.clean_unreconciled_streaming_part(part_id, session_id, attempt_token, &part_key)
+                .await?;
+            return Err(put_error);
         }
 
         let advanced = sqlx::query(
             "UPDATE content_vault.upload_parts AS parts \
-             SET state = 'uploaded', size_bytes = $1, sha256 = $2, updated_at = $3 \
+             SET state = 'uploaded', size_bytes = $1, sha256 = $2, \
+                 writer_resolved_at = $3, updated_at = $3 \
              FROM content_vault.upload_sessions AS sessions \
              WHERE parts.part_id = $4 AND parts.state = 'pending' \
                AND sessions.session_id = parts.session_id \
@@ -706,14 +709,33 @@ impl ContentVault {
         .bind(part_id)
         .bind(attempt_token)
         .execute(&self.pool)
-        .await
-        .map_err(|error| map_part_reconciliation_error(&error))?;
-        if advanced.rows_affected() != 1 {
-            return Err(ContentVaultError::conflict(
-                "streaming lease was superseded before part reconciliation",
-            ));
+        .await;
+        match advanced {
+            Ok(result) if result.rows_affected() == 1 => Ok(capacity),
+            Ok(_) => {
+                self.clean_unreconciled_streaming_part(
+                    part_id,
+                    session_id,
+                    attempt_token,
+                    &part_key,
+                )
+                .await?;
+                Err(ContentVaultError::conflict(
+                    "streaming lease was superseded before part reconciliation",
+                ))
+            }
+            Err(error) => {
+                let reconciliation_error = map_part_reconciliation_error(&error);
+                self.clean_unreconciled_streaming_part(
+                    part_id,
+                    session_id,
+                    attempt_token,
+                    &part_key,
+                )
+                .await?;
+                Err(reconciliation_error)
+            }
         }
-        Ok(capacity)
     }
 
     async fn claim_streaming_lease(
@@ -794,13 +816,80 @@ impl ContentVault {
     async fn abandon_streaming_part(&self, part_id: Uuid) {
         let _ = sqlx::query(
             "UPDATE content_vault.upload_parts \
-             SET state = 'abandoned', updated_at = $1 \
+             SET state = 'abandoned', writer_resolved_at = $1, updated_at = $1 \
              WHERE part_id = $2 AND state = 'pending'",
         )
         .bind(Utc::now())
         .bind(part_id)
         .execute(&self.pool)
         .await;
+    }
+
+    async fn clean_unreconciled_streaming_part(
+        &self,
+        part_id: Uuid,
+        session_id: UploadSessionId,
+        attempt_token: Uuid,
+        quarantine_key: &str,
+    ) -> Result<(), ContentVaultError> {
+        // The object-store put cannot share a transaction with PostgreSQL. This is the first
+        // durable boundary after a successful or uncertain put, so it deliberately re-arms an
+        // earlier missing-object cleanup before deleting the exact attempt key. Until this runs,
+        // the nullable writer-resolution marker keeps sweeps eligible instead of recording
+        // terminal cleanup success.
+        let now = Utc::now();
+        let fenced = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE content_vault.upload_parts AS parts \
+             SET state = 'abandoned', writer_resolved_at = $1, \
+                 quarantine_cleanup_succeeded_at = NULL, updated_at = $1 \
+             FROM content_vault.upload_sessions AS sessions \
+             WHERE parts.part_id = $2 AND parts.session_id = $3 \
+               AND parts.attempt_token = $4 AND parts.quarantine_key = $5 \
+               AND parts.state IN ('pending', 'abandoned') \
+               AND sessions.session_id = parts.session_id \
+               AND sessions.ingestion_mode = 'streaming' \
+             RETURNING parts.part_id",
+        )
+        .bind(now)
+        .bind(part_id)
+        .bind(session_id.as_uuid())
+        .bind(attempt_token)
+        .bind(quarantine_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| ContentVaultError::database())?;
+        if fenced.is_none() {
+            // A reconciliation response can be uncertain. Never delete an object once the exact
+            // part has reached `uploaded`, because a resumed writer may rely on it.
+            return Ok(());
+        }
+
+        let deleted = self.quarantine.delete_exact(quarantine_key).await.is_ok();
+        let updated = sqlx::query(
+            "UPDATE content_vault.upload_parts \
+             SET quarantine_cleanup_attempted_at = $1, \
+                 quarantine_cleanup_succeeded_at = CASE WHEN $6 THEN $1 ELSE NULL END, \
+                 quarantine_cleanup_attempts = quarantine_cleanup_attempts + 1, \
+                 updated_at = $1 \
+             WHERE part_id = $2 AND session_id = $3 AND attempt_token = $4 \
+               AND quarantine_key = $5 AND state = 'abandoned'",
+        )
+        .bind(Utc::now())
+        .bind(part_id)
+        .bind(session_id.as_uuid())
+        .bind(attempt_token)
+        .bind(quarantine_key)
+        .bind(deleted)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| ContentVaultError::database())?;
+        if updated.rows_affected() != 1 {
+            return Err(ContentVaultError::database());
+        }
+        if !deleted {
+            return Err(ContentVaultError::storage());
+        }
+        Ok(())
     }
 
     async fn streaming_session(
@@ -1530,7 +1619,7 @@ fn streaming_part_key(
     part_index: u32,
 ) -> String {
     format!(
-        "tenants/{}/streaming-sessions/{session_id}/attempts/{attempt_token}/parts/{part_index:08}",
+        "{STREAMING_ATTEMPT_PREFIX}/tenants/{}/streaming-sessions/{session_id}/attempts/{attempt_token}/parts/{part_index:08}",
         tenant_storage_token(tenant_id)
     )
 }

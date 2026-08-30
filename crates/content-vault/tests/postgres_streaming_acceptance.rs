@@ -6,9 +6,11 @@ use crate::test_support::{
     OwnerGrant, OwnerRef, ProtectedStore, QuarantineStore, ReserveUploadRequest, StageOutcome,
     StoreByteStream, StoreError, StoreErrorKind, StoreRead,
 };
+use crate::{public::UploadSessionId, storage::STREAMING_ATTEMPT_PREFIX};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use chrono::{DateTime, Duration, Utc};
 use futures::{StreamExt as _, stream};
 use lenso::{Ctx, PluginError, ProviderStream, RuntimeFailure};
 use lenso_capability_content_vault as capability;
@@ -18,7 +20,10 @@ use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWriteExt as _, ReadBuf};
 
@@ -32,6 +37,16 @@ struct MemoryStreamingArea {
     objects: Mutex<BTreeMap<String, Vec<u8>>>,
     largest_put_chunk: Mutex<usize>,
     fail_next_stream_read: Mutex<bool>,
+    put_gate: Mutex<Option<PutGate>>,
+    post_put_gate: Mutex<Option<PutGate>>,
+    fail_after_put_once: AtomicBool,
+    delete_calls: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct PutGate {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 impl MemoryStreamingArea {
@@ -102,8 +117,57 @@ impl MemoryStreamingArea {
         std::mem::take(&mut *self.fail_next_stream_read.lock().unwrap())
     }
 
+    fn gate_next_put(&self) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *self.put_gate.lock().unwrap() = Some(PutGate {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        (entered, release)
+    }
+
+    fn take_put_gate(&self) -> Option<PutGate> {
+        self.put_gate.lock().unwrap().take()
+    }
+
+    fn gate_after_next_put(&self) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *self.post_put_gate.lock().unwrap() = Some(PutGate {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        (entered, release)
+    }
+
+    fn take_post_put_gate(&self) -> Option<PutGate> {
+        self.post_put_gate.lock().unwrap().take()
+    }
+
+    fn fail_after_next_put(&self) {
+        self.fail_after_put_once.store(true, Ordering::Relaxed);
+    }
+
+    fn take_post_put_failure(&self) -> bool {
+        self.fail_after_put_once.swap(false, Ordering::Relaxed)
+    }
+
+    fn contains_value(&self, value: &[u8]) -> bool {
+        self.objects
+            .lock()
+            .unwrap()
+            .values()
+            .any(|candidate| candidate == value)
+    }
+
     fn delete_exact(&self, key: &str) {
+        self.delete_calls.fetch_add(1, Ordering::Relaxed);
         self.objects.lock().unwrap().remove(key);
+    }
+
+    fn delete_calls(&self) -> usize {
+        self.delete_calls.load(Ordering::Relaxed)
     }
 
     fn largest_put_chunk(&self) -> usize {
@@ -139,7 +203,25 @@ impl QuarantineStore for MemoryQuarantine {
     }
 
     async fn put_immutable(&self, key: &str, bytes: Vec<u8>) -> Result<ImmutablePut, StoreError> {
-        self.0.put_immutable(key, bytes)
+        if let Some(gate) = self.0.take_put_gate() {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+        let result = self.0.put_immutable(key, bytes);
+        if result.is_ok()
+            && let Some(gate) = self.0.take_post_put_gate()
+        {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+        if result.is_ok() && self.0.take_post_put_failure() {
+            Err(StoreError::new(
+                StoreErrorKind::Unavailable,
+                "injected uncertain quarantine put failure",
+            ))
+        } else {
+            result
+        }
     }
 
     async fn delete_exact(&self, key: &str) -> Result<(), StoreError> {
@@ -208,6 +290,15 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_migration_count(CONTENT_VAULT_MIGRATIONS.len()).await
+    }
+
+    async fn before_cleanup_migration() -> Self {
+        assert_eq!(CONTENT_VAULT_MIGRATIONS.len(), 3);
+        Self::with_migration_count(CONTENT_VAULT_MIGRATIONS.len() - 1).await
+    }
+
+    async fn with_migration_count(migration_count: usize) -> Self {
         let database_url = std::env::var("CONTENT_VAULT_TEST_DATABASE_URL").expect(
             "postgres-acceptance requires CONTENT_VAULT_TEST_DATABASE_URL; it never silently skips",
         );
@@ -237,7 +328,7 @@ impl Fixture {
             .execute(&pool)
             .await
             .unwrap();
-        for migration in CONTENT_VAULT_MIGRATIONS {
+        for migration in &CONTENT_VAULT_MIGRATIONS[..migration_count] {
             sqlx::raw_sql(migration.sql()).execute(&pool).await.unwrap();
         }
 
@@ -574,6 +665,278 @@ async fn an_active_streaming_writer_renews_its_database_lease() {
         commit.await.unwrap().unwrap().size_bytes(),
         bytes.len() as u64
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successful_late_streaming_part_put_is_fenced_and_cleaned() {
+    late_streaming_part_put_is_fenced_and_cleaned(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cleanup_migration_keeps_legacy_abandoned_writers_unresolved_and_retryable() {
+    let fixture = Fixture::before_cleanup_migration().await;
+    let grant = owner("tenant-stream", "legacy-abandoned-migration");
+    let bytes = b"legacy late writer bytes".to_vec();
+    let session_id = fixture
+        .vault
+        .reserve_streaming_upload(
+            &grant,
+            &ReserveUploadRequest::new(
+                "legacy-abandoned-migration-reserve",
+                sha256(&bytes),
+                bytes.len() as u64,
+                "text/plain",
+                600,
+            ),
+        )
+        .await
+        .unwrap()
+        .session_id();
+    let part_id = uuid::Uuid::now_v7();
+    let legacy_key = format!("tenants/legacy/streaming-parts/{part_id}");
+    let legacy_cleanup_at = Utc::now() - Duration::seconds(2);
+    sqlx::query(
+        "INSERT INTO content_vault.upload_parts (\
+             part_id, session_id, part_index, byte_offset, quarantine_key, attempt_token, \
+             state, quarantine_cleanup_attempted_at, quarantine_cleanup_succeeded_at, \
+             quarantine_cleanup_attempts, created_at, updated_at\
+         ) VALUES ($1, $2, 0, 0, $3, $4, 'abandoned', $5, $5, 1, $5, $5)",
+    )
+    .bind(part_id)
+    .bind(session_id.as_uuid())
+    .bind(&legacy_key)
+    .bind(uuid::Uuid::now_v7())
+    .bind(legacy_cleanup_at)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    sqlx::raw_sql(CONTENT_VAULT_MIGRATIONS[2].sql())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(pending_part_cleanup_is_unresolved(&fixture, session_id).await);
+    assert!(!legacy_key.starts_with(STREAMING_ATTEMPT_PREFIX));
+
+    fixture
+        .quarantine
+        .0
+        .put_immutable(&legacy_key, bytes.clone())
+        .unwrap();
+    let first_retry = fixture
+        .vault
+        .sweep_terminal_quarantine_at(Utc::now(), Duration::zero(), 100)
+        .await
+        .unwrap();
+    assert_eq!(first_retry.cleaned_objects, 1);
+    assert!(!fixture.quarantine.0.contains_value(&bytes));
+    assert!(pending_part_cleanup_is_unresolved(&fixture, session_id).await);
+
+    fixture
+        .quarantine
+        .0
+        .put_immutable(&legacy_key, bytes.clone())
+        .unwrap();
+    let second_retry = fixture
+        .vault
+        .sweep_terminal_quarantine_at(Utc::now() + Duration::seconds(1), Duration::zero(), 100)
+        .await
+        .unwrap();
+    assert_eq!(second_retry.cleaned_objects, 1);
+    assert!(!fixture.quarantine.0.contains_value(&bytes));
+    let cleanup_attempts: i64 = sqlx::query_scalar(
+        "SELECT quarantine_cleanup_attempts FROM content_vault.upload_parts WHERE part_id = $1",
+    )
+    .bind(part_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(cleanup_attempts, 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_uncertain_late_streaming_part_put_is_fenced_and_cleaned() {
+    late_streaming_part_put_is_fenced_and_cleaned(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aborted_writer_after_part_persistence_remains_sweep_eligible() {
+    let fixture = Fixture::new().await;
+    let grant = owner("tenant-stream", "aborted-after-persist");
+    let bytes = b"persisted just before the writer crashes".to_vec();
+    let upload = fixture
+        .vault
+        .reserve_streaming_upload(
+            &grant,
+            &ReserveUploadRequest::new(
+                "aborted-after-persist-reserve",
+                sha256(&bytes),
+                bytes.len() as u64,
+                "text/plain",
+                1,
+            ),
+        )
+        .await
+        .unwrap();
+    let session_id = upload.session_id();
+    let (before_put, release_put) = fixture.quarantine.0.gate_next_put();
+    let (after_put, _finish_put) = fixture.quarantine.0.gate_after_next_put();
+    let late_bytes = bytes.clone();
+    let writer = tokio::spawn(async move { upload.commit(std::io::Cursor::new(late_bytes)).await });
+    before_put.notified().await;
+    let part_key: String = sqlx::query_scalar(
+        "SELECT quarantine_key FROM content_vault.upload_parts WHERE session_id = $1",
+    )
+    .bind(session_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert!(part_key.starts_with(STREAMING_ATTEMPT_PREFIX));
+
+    sqlx::query(
+        "UPDATE content_vault.upload_sessions \
+         SET staging_started_at = $1, updated_at = $1 \
+         WHERE session_id = $2",
+    )
+    .bind(Utc::now() - Duration::seconds(1_000))
+    .bind(session_id.as_uuid())
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let terminal_time = Utc::now() + Duration::seconds(2);
+    fixture
+        .vault
+        .sweep_terminal_quarantine_at(terminal_time, Duration::zero(), 100)
+        .await
+        .unwrap();
+    assert!(pending_part_cleanup_is_unresolved(&fixture, session_id).await);
+
+    release_put.notify_one();
+    after_put.notified().await;
+    assert!(fixture.quarantine.0.contains_value(&bytes));
+    writer.abort();
+    assert!(writer.await.unwrap_err().is_cancelled());
+
+    let second_sweep = fixture
+        .vault
+        .sweep_terminal_quarantine_at(terminal_time + Duration::seconds(1), Duration::zero(), 100)
+        .await
+        .unwrap();
+    assert_eq!(second_sweep.cleaned_objects, 1);
+    assert!(!fixture.quarantine.0.contains_value(&bytes));
+    assert!(pending_part_cleanup_is_unresolved(&fixture, session_id).await);
+}
+
+async fn late_streaming_part_put_is_fenced_and_cleaned(fail_after_put: bool) {
+    let fixture = Fixture::new().await;
+    let (resource_id, idempotency_key, bytes) = if fail_after_put {
+        (
+            "uncertain-late-part",
+            "uncertain-late-part-reserve",
+            b"uncertain late streaming part".to_vec(),
+        )
+    } else {
+        (
+            "successful-late-part",
+            "successful-late-part-reserve",
+            b"successful late streaming part".to_vec(),
+        )
+    };
+    let grant = owner("tenant-stream", resource_id);
+    let upload = fixture
+        .vault
+        .reserve_streaming_upload(
+            &grant,
+            &ReserveUploadRequest::new(
+                idempotency_key,
+                sha256(&bytes),
+                bytes.len() as u64,
+                "text/plain",
+                1,
+            ),
+        )
+        .await
+        .unwrap();
+    let session_id = upload.session_id();
+    if fail_after_put {
+        fixture.quarantine.0.fail_after_next_put();
+    }
+    let (entered, release) = fixture.quarantine.0.gate_next_put();
+    let late_bytes = bytes.clone();
+    let commit = tokio::spawn(async move { upload.commit(std::io::Cursor::new(late_bytes)).await });
+    entered.notified().await;
+
+    sqlx::query(
+        "UPDATE content_vault.upload_sessions \
+         SET staging_started_at = $1, updated_at = $1 \
+         WHERE session_id = $2",
+    )
+    .bind(Utc::now() - Duration::seconds(1_000))
+    .bind(session_id.as_uuid())
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    let delete_calls_before = fixture.quarantine.0.delete_calls();
+    let terminal_time = Utc::now() + Duration::seconds(2);
+    let first_sweep = fixture
+        .vault
+        .sweep_terminal_quarantine_at(terminal_time, Duration::zero(), 100)
+        .await
+        .unwrap();
+    assert_eq!(first_sweep.expired_sessions, 1);
+    assert!(pending_part_cleanup_is_unresolved(&fixture, session_id).await);
+    assert_eq!(fixture.quarantine.0.delete_calls(), delete_calls_before + 2);
+
+    release.notify_one();
+    let error = commit
+        .await
+        .unwrap()
+        .expect_err("a fenced late streaming writer must not reconcile its part");
+    assert_eq!(
+        error.code(),
+        if fail_after_put {
+            ContentVaultErrorCode::StorageUnavailable
+        } else {
+            ContentVaultErrorCode::Conflict
+        }
+    );
+    assert!(!fixture.quarantine.0.contains_value(&bytes));
+
+    let (cleanup_succeeded_at, cleanup_attempts): (Option<DateTime<Utc>>, i64) = sqlx::query_as(
+        "SELECT quarantine_cleanup_succeeded_at, quarantine_cleanup_attempts \
+         FROM content_vault.upload_parts WHERE session_id = $1",
+    )
+    .bind(session_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert!(cleanup_succeeded_at.is_some());
+    assert_eq!(cleanup_attempts, 2);
+    assert_eq!(fixture.quarantine.0.delete_calls(), delete_calls_before + 3);
+
+    let second_sweep = fixture
+        .vault
+        .sweep_terminal_quarantine_at(terminal_time + Duration::seconds(1), Duration::zero(), 100)
+        .await
+        .unwrap();
+    assert_eq!(second_sweep.cleaned_objects, 0);
+    assert_eq!(second_sweep.failed_objects, 0);
+    assert_eq!(fixture.quarantine.0.delete_calls(), delete_calls_before + 3);
+}
+
+async fn pending_part_cleanup_is_unresolved(
+    fixture: &Fixture,
+    session_id: UploadSessionId,
+) -> bool {
+    sqlx::query_scalar(
+        "SELECT writer_resolved_at IS NULL AND quarantine_cleanup_succeeded_at IS NULL \
+         FROM content_vault.upload_parts WHERE session_id = $1",
+    )
+    .bind(session_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
