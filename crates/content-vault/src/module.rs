@@ -175,6 +175,14 @@ pub fn manifest() -> ModuleManifest {
                 reversible: false,
                 activation: ModuleMigrationActivation::BeforeActivation,
             },
+            ModuleMigrationDeclaration {
+                migration_id: "content-vault/0003_pending_quarantine_cleanup_indexes".to_owned(),
+                order: 3,
+                store: "host".to_owned(),
+                destructive: false,
+                reversible: false,
+                activation: ModuleMigrationActivation::BeforeActivation,
+            },
         ])
         .build()
 }

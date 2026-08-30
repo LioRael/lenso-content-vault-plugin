@@ -339,11 +339,60 @@ impl ContentVault {
         .await
         .map_err(|_| ContentVaultError::database())?;
         if reset.rows_affected() != 1 {
+            self.clean_expired_staging_write(session_id, attempt_token, &session.quarantine_key)
+                .await?;
             return Err(ContentVaultError::conflict(
                 "staging lease was superseded before reconciliation",
             ));
         }
         put_result
+    }
+
+    async fn clean_expired_staging_write(
+        &self,
+        session_id: UploadSessionId,
+        attempt_token: Uuid,
+        quarantine_key: &str,
+    ) -> Result<(), ContentVaultError> {
+        let is_expired_attempt = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(\
+                 SELECT 1 FROM content_vault.upload_sessions \
+                 WHERE session_id = $1 AND state = 'expired' AND staging_token = $2\
+             )",
+        )
+        .bind(session_id.as_uuid())
+        .bind(attempt_token)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| ContentVaultError::database())?;
+        if !is_expired_attempt {
+            return Ok(());
+        }
+
+        let now = Utc::now();
+        let deleted = self.quarantine.delete_exact(quarantine_key).await.is_ok();
+        let updated = sqlx::query(
+            "UPDATE content_vault.upload_sessions \
+             SET quarantine_cleanup_attempted_at = $1, \
+                 quarantine_cleanup_succeeded_at = CASE WHEN $4 THEN $1 ELSE NULL END, \
+                 quarantine_cleanup_attempts = quarantine_cleanup_attempts + 1, \
+                 updated_at = $1 \
+             WHERE session_id = $2 AND state = 'expired' AND staging_token = $3",
+        )
+        .bind(now)
+        .bind(session_id.as_uuid())
+        .bind(attempt_token)
+        .bind(deleted)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| ContentVaultError::database())?;
+        if updated.rows_affected() != 1 {
+            return Err(ContentVaultError::database());
+        }
+        if !deleted {
+            return Err(ContentVaultError::storage());
+        }
+        Ok(())
     }
 
     pub async fn complete_upload(
@@ -686,6 +735,7 @@ impl ContentVault {
                 FROM content_vault.upload_sessions AS sessions \
                 WHERE sessions.state IN ('committed', 'rejected', 'expired') \
                   AND sessions.terminal_at <= $1 \
+                  AND sessions.quarantine_cleanup_succeeded_at IS NULL \
                 UNION ALL \
                 SELECT 'part'::text AS object_kind, parts.part_id AS object_id, \
                        parts.quarantine_key, \
@@ -697,9 +747,11 @@ impl ContentVault {
                 FROM content_vault.upload_parts AS parts \
                 JOIN content_vault.upload_sessions AS sessions \
                   ON sessions.session_id = parts.session_id \
-                WHERE (parts.state = 'abandoned' AND parts.created_at <= $1) \
-                   OR (sessions.state IN ('committed', 'rejected', 'expired') \
-                       AND sessions.terminal_at <= $1)\
+                WHERE (parts.quarantine_cleanup_succeeded_at IS NULL \
+                       OR parts.writer_resolved_at IS NULL) \
+                  AND ((parts.state = 'abandoned' AND parts.created_at <= $1) \
+                       OR (sessions.state IN ('committed', 'rejected', 'expired') \
+                           AND sessions.terminal_at <= $1))\
              ) \
              SELECT object_kind, object_id, quarantine_key \
              FROM cleanup_candidates \
@@ -750,7 +802,8 @@ impl ContentVault {
                      updated_at = $1 \
                  WHERE session_id = $2 AND quarantine_key = $3 \
                    AND state IN ('committed', 'rejected', 'expired') \
-                   AND terminal_at <= $4",
+                   AND terminal_at <= $4 \
+                   AND quarantine_cleanup_succeeded_at IS NULL",
             )
             .bind(now)
             .bind(candidate.object_id)
@@ -764,13 +817,17 @@ impl ContentVault {
             sqlx::query(
                 "UPDATE content_vault.upload_parts AS parts \
                  SET quarantine_cleanup_attempted_at = $1, \
-                     quarantine_cleanup_succeeded_at = CASE WHEN $5 THEN $1 \
-                                                            ELSE parts.quarantine_cleanup_succeeded_at END, \
+                     quarantine_cleanup_succeeded_at = CASE \
+                         WHEN $5 AND parts.writer_resolved_at IS NOT NULL THEN $1 \
+                         ELSE NULL \
+                     END, \
                      quarantine_cleanup_attempts = parts.quarantine_cleanup_attempts + 1, \
                      updated_at = $1 \
                  FROM content_vault.upload_sessions AS sessions \
                  WHERE parts.part_id = $2 AND parts.quarantine_key = $3 \
                    AND sessions.session_id = parts.session_id \
+                   AND (parts.quarantine_cleanup_succeeded_at IS NULL \
+                        OR parts.writer_resolved_at IS NULL) \
                    AND ((parts.state = 'abandoned' AND parts.created_at <= $4) \
                         OR (sessions.state IN ('committed', 'rejected', 'expired') \
                             AND sessions.terminal_at <= $4))",
