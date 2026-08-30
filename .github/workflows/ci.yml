@@ -59,12 +59,29 @@ jobs:
           exit 1
       - name: Check formatting
         run: cargo fmt --all --check
+      - name: Verify generated Capability freshness and removed Host boundary
+        run: |
+          cargo check --locked -p lenso-capability-content-vault
+          cargo test --locked -p lenso-content-vault-plugin --all-features --doc
+          cargo metadata --locked --no-deps --format-version 1 | python3 -c '
+          import json, sys
+          package = next(item for item in json.load(sys.stdin)["packages"] if item["name"] == "lenso-content-vault-plugin")
+          assert not [target for target in package["targets"] if "test" in target["kind"]]
+          '
+          if rg -n 'lenso::(host|platform)|HostLinkedModule|pub mod test_support' crates/content-vault/src README.md docs; then
+            exit 1
+          fi
+          if rg -n '/Users/|\.worktrees/' README.md docs crates; then
+            exit 1
+          fi
       - name: Run all tests, including PostgreSQL and S3 acceptance
         run: cargo test --locked --workspace --all-features
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Verify package contents
-        run: cargo package --locked -p lenso-module-content-vault --features s3
+        run: |
+          cargo package --locked -p lenso-capability-content-vault --list
+          cargo package --locked -p lenso-content-vault-plugin --list
       - name: Stop isolated S3-compatible test storage
         if: always()
         run: docker rm --force content-vault-minio || true

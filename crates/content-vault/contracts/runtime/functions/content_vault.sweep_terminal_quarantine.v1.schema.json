@@ -1,8 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "content_vault.sweep_terminal_quarantine.v1",
-  "title": "content_vault.sweep_terminal_quarantine.v1",
-  "type": "object",
-  "properties": {},
-  "additionalProperties": false
-}

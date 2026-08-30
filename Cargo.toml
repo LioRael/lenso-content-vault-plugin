@@ -1,29 +1,47 @@
 [workspace]
 resolver = "2"
-members = ["crates/content-vault"]
+members = [
+    "crates/content-vault",
+    "crates/lenso-capability-content-vault",
+]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/LioRael/lenso-content-vault-plugin"
 rust-version = "1.94"
 
 [workspace.dependencies]
 async-trait = "0.1"
 async-stream = "0.3"
+base64 = "0.22"
 bytes = "1.12"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-lenso = { version = "0.3.44", features = ["host"] }
+lenso = { version = "0.5.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "89815107385475c8b5be378bdcf5e21aa74e02f0" }
+lenso-app-plan = { version = "0.3.0", git = "https://github.com/LioRael/lenso", rev = "8599db7e4a214ed92f32089f81d14c833d4becf6" }
+lenso-capability-secrets = { version = "0.1.2", git = "https://github.com/LioRael/lenso-secrets-plugin", rev = "967fa0d2908b58c24a4b1ad26103a3d9173bbac0" }
+lenso-contract-authoring = { version = "0.1.1", git = "https://github.com/LioRael/lenso-protocols", rev = "9d2774c767fd64a6cc63a5ac04360e9cb92816da" }
+lenso-contract-codegen = { version = "0.6.4", git = "https://github.com/LioRael/lenso-protocols", rev = "9d2774c767fd64a6cc63a5ac04360e9cb92816da" }
+lenso-contract-runtime = { version = "0.1.3", git = "https://github.com/LioRael/lenso-protocols", rev = "9d2774c767fd64a6cc63a5ac04360e9cb92816da" }
+lenso-kernel = { version = "0.2.0", git = "https://github.com/LioRael/lenso", rev = "8599db7e4a214ed92f32089f81d14c833d4becf6" }
+lenso-native-adapter = { version = "0.3.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "89815107385475c8b5be378bdcf5e21aa74e02f0" }
+lenso-plugin-authoring = { version = "0.1.1", git = "https://github.com/LioRael/lenso-protocols", rev = "9d2774c767fd64a6cc63a5ac04360e9cb92816da" }
+lenso-postgres-kit = { version = "0.1.0", git = "https://github.com/LioRael/lenso-postgres-kit", rev = "97ff73638d1fca098034c443539d44d95062eea4" }
+lenso-test = { version = "0.1.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "89815107385475c8b5be378bdcf5e21aa74e02f0" }
 object_store = { version = "0.12", default-features = false }
+schemars = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "chrono", "json", "uuid"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "chrono", "derive", "json", "uuid"] }
 thiserror = "2.0"
-tokio = { version = "1.52", features = ["io-util", "macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.52", features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
+url = "2.5"
 uuid = { version = "1.19", features = ["serde", "v7"] }
+zeroize = "1.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

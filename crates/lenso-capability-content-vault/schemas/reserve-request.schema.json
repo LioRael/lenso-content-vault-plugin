@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "grant",
+    "idempotency_key",
+    "expected_sha256",
+    "expected_size_bytes",
+    "media_type",
+    "ttl_seconds"
+  ],
+  "properties": {
+    "grant": {
+      "$ref": "#/$defs/OwnerGrant"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "pattern": "^[^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F][^\\x00-\\x1F\\x7F]*$"
+    },
+    "expected_sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "expected_size_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1073741824
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 10,
+      "pattern": "^text/plain$"
+    },
+    "ttl_seconds": {
+      "type": "integer",
+      "minimum": 60,
+      "maximum": 86400
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Owner": {
+      "type": "object",
+      "required": ["plugin_instance", "resource_type", "resource_id"],
+      "properties": {
+        "plugin_instance": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"
+        },
+        "resource_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F][^\\x00-\\x1F\\x7F]*$"
+        },
+        "resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F][^\\x00-\\x1F\\x7F]*$"
+        },
+        "revision_id": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F][^\\x00-\\x1F\\x7F]*$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "OwnerGrant": {
+      "type": "object",
+      "required": ["tenant_id", "owner", "actor_id", "correlation_id"],
+      "properties": {
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F][^\\x00-\\x1F\\x7F]*$"
+        },
+        "owner": {
+          "$ref": "#/$defs/Owner"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F][^\\x00-\\x1F\\x7F]*$"
+        },
+        "correlation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F][^\\x00-\\x1F\\x7F]*$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "title": "ReserveRequest"
+}
