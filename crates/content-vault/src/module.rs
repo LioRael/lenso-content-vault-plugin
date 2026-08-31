@@ -1113,13 +1113,13 @@ mod tests {
         SecretsProvider,
     };
     use lenso_kernel::{
-        CancellationToken, NativeRequestEndpoint, NativeRequestFuture, NativeStreamEndpoint,
-        NativeStreamItem, NativeStreamSession, NoopPluginLifecycle, ShutdownOutcome,
+        CancellationToken, DeterministicDriver, Kernel, NativeRequestEndpoint, NativeRequestFuture,
+        NativeStreamEndpoint, NativeStreamItem, NativeStreamSession, NoopPluginLifecycle,
+        ShutdownOutcome,
     };
     use lenso_native_adapter::{
-        NativePluginFactory, NativePluginFactoryContext, NativePluginInstance,
+        NativePluginFactory, NativePluginFactoryContext, NativePluginInstance, NativePluginRegistry,
     };
-    use lenso_test::TestApp;
     use std::{collections::BTreeMap, time::Duration};
 
     const CONSUMER_PACKAGE_ID: &str = "test.content-vault-consumer";
@@ -1577,32 +1577,42 @@ mod tests {
 
     #[test]
     fn generated_client_observes_success_domain_and_runtime_outcomes() {
-        let app = TestApp::builder(fixture_plan())
-            .with_factory(FixtureFactory)
-            .with_factory(ConsumerFactory)
-            .start()
+        let driver = DeterministicDriver::new();
+        let app = driver
+            .run(Kernel::start_native(
+                fixture_plan(),
+                driver.clone(),
+                NativePluginRegistry::new()
+                    .with_factory(FixtureFactory)
+                    .with_factory(ConsumerFactory),
+            ))
             .expect("fixture App starts");
-        let client = app
-            .client::<capability::ContentVaultClient>("consumer")
-            .expect("generated Client binds through the Plan");
+        let client = capability::ContentVaultClient::from_dependencies(
+            &app.dependencies("consumer")
+                .expect("consumer dependencies exist"),
+        )
+        .expect("generated Client binds through the Plan");
 
-        let success = app
+        let success = driver
             .run(client.describe(describe_request("success")))
             .expect("fixture success");
         assert_eq!(success.content.content_id, "success");
         assert!(matches!(
-            app.run(client.describe(describe_request("missing"))),
+            driver.run(client.describe(describe_request("missing"))),
             Err(capability::ContentVaultDescribeInvocationError::Domain(
                 capability::DescribeError::NotFound
             ))
         ));
         assert!(matches!(
-            app.run(client.describe(describe_request("runtime"))),
+            driver.run(client.describe(describe_request("runtime"))),
             Err(capability::ContentVaultDescribeInvocationError::Runtime(
                 RuntimeFailure::PluginFailure { detail }
             )) if detail == "fixture unavailable"
         ));
-        assert_eq!(app.shutdown(Duration::from_secs(1)), ShutdownOutcome::Clean);
+        assert_eq!(
+            driver.run(app.shutdown(Duration::from_secs(1))),
+            ShutdownOutcome::Clean
+        );
     }
 
     #[test]
@@ -1618,10 +1628,15 @@ mod tests {
             "stream_channel_capacity":1,
             "maintenance_callers":["maintenance.jobs"]
         }"#;
-        let error = TestApp::builder(actual_plan(invalid))
-            .with_linked_factories()
-            .with_factory(StaticSecretsFactory::default())
-            .start()
+        let driver = DeterministicDriver::new();
+        let error = driver
+            .run(Kernel::start_native(
+                actual_plan(invalid),
+                driver.clone(),
+                NativePluginRegistry::new()
+                    .with_linked_factories()
+                    .with_factory(StaticSecretsFactory::default()),
+            ))
             .expect_err("semantic configuration validation must reject startup");
         assert!(matches!(error, RuntimeFailure::InvalidResolvedPlan { .. }));
     }
@@ -1634,12 +1649,20 @@ mod tests {
         )
         .resolve()
         .unwrap();
-        let app = TestApp::builder(plan)
-            .with_linked_factories()
-            .with_factory(EmptyFactory)
-            .start()
+        let driver = DeterministicDriver::new();
+        let app = driver
+            .run(Kernel::start_native(
+                plan,
+                driver.clone(),
+                NativePluginRegistry::new()
+                    .with_linked_factories()
+                    .with_factory(EmptyFactory),
+            ))
             .expect("unselected Content Vault Plugin is inert");
-        assert_eq!(app.shutdown(Duration::from_secs(1)), ShutdownOutcome::Clean);
+        assert_eq!(
+            driver.run(app.shutdown(Duration::from_secs(1))),
+            ShutdownOutcome::Clean
+        );
     }
 
     fn owner_grant(owner: &str) -> capability::OwnerGrant {

@@ -30,7 +30,6 @@ lenso-kernel = { version = "0.2.0", git = "https://github.com/LioRael/lenso", re
 lenso-native-adapter = { version = "0.3.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "89815107385475c8b5be378bdcf5e21aa74e02f0" }
 lenso-plugin-authoring = { version = "0.1.1", git = "https://github.com/LioRael/lenso-protocols", rev = "9d2774c767fd64a6cc63a5ac04360e9cb92816da" }
 lenso-postgres-kit = { version = "0.1.0", git = "https://github.com/LioRael/lenso-postgres-kit", rev = "97ff73638d1fca098034c443539d44d95062eea4" }
-lenso-test = { version = "0.1.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "89815107385475c8b5be378bdcf5e21aa74e02f0" }
 object_store = { version = "0.12", default-features = false }
 schemars = "1.2"
 serde = { version = "1.0", features = ["derive"] }
