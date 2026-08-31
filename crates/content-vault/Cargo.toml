@@ -53,7 +53,6 @@ zeroize.workspace = true
 lenso-app-plan.workspace = true
 lenso-kernel.workspace = true
 lenso-native-adapter.workspace = true
-lenso-test.workspace = true
 
 [lints]
 workspace = true

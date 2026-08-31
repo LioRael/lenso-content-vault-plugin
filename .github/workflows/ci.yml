@@ -82,6 +82,8 @@ jobs:
         run: |
           cargo package --locked -p lenso-capability-content-vault --list
           cargo package --locked -p lenso-content-vault-plugin --list
+      - name: Verify Plugin publishability
+        run: cargo publish --dry-run --locked -p lenso-content-vault-plugin
       - name: Stop isolated S3-compatible test storage
         if: always()
         run: docker rm --force content-vault-minio || true

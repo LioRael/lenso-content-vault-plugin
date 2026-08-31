@@ -1037,7 +1037,6 @@ dependencies = [
  "lenso-kernel",
  "lenso-native-adapter",
  "lenso-postgres-kit",
- "lenso-test",
  "object_store",
  "serde",
  "serde_json",
@@ -1155,17 +1154,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "lenso-test"
-version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=89815107385475c8b5be378bdcf5e21aa74e02f0#89815107385475c8b5be378bdcf5e21aa74e02f0"
-dependencies = [
- "lenso-app-plan",
- "lenso-kernel",
- "lenso-native-adapter",
- "lenso-plugin-authoring",
 ]
 
 [[package]]
