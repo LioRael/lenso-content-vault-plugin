@@ -62,6 +62,11 @@ rejected when the endpoint is absent or HTTPS. Endpoint userinfo, query, and
 fragment components are rejected so authority cannot be smuggled into Debug
 configuration. Resolved access-key/secret values, and a configured session
 token, must be non-empty. `maintenance_callers` is unique and capped at 64.
+The package configuration schema deliberately stays within the current
+App-plan JSON Schema subset. `ContentVaultPluginConfig::validate` remains the
+fail-closed authority for string bounds, secret-reference syntax, numeric
+ceilings, caller uniqueness, and the endpoint/HTTP relationship before the
+Plugin starts.
 
 The implementation never discovers production S3 settings or credentials from
 process environment variables. PostgreSQL and S3 credential values are

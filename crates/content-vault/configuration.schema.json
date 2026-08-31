@@ -14,87 +14,38 @@
     "maintenance_callers"
   ],
   "properties": {
-    "database_url_secret": { "$ref": "#/$defs/secretReference" },
+    "database_url_secret": { "type": "string" },
     "s3_bucket": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 255
+      "type": "string"
     },
     "s3_region": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 100
+      "type": "string"
     },
     "s3_endpoint": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 2048,
-      "pattern": "^https?://"
+      "type": "string"
     },
-    "s3_access_key_id_secret": { "$ref": "#/$defs/secretReference" },
-    "s3_secret_access_key_secret": { "$ref": "#/$defs/secretReference" },
-    "s3_session_token_secret": { "$ref": "#/$defs/secretReference" },
+    "s3_access_key_id_secret": { "type": "string" },
+    "s3_secret_access_key_secret": { "type": "string" },
+    "s3_session_token_secret": { "type": "string" },
     "s3_allow_http": {
       "type": "boolean"
     },
     "quarantine_grace_seconds": {
       "type": "integer",
-      "minimum": 0,
-      "maximum": 31536000
+      "minimum": 0
     },
     "sweep_batch_limit": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 1000
+      "minimum": 1
     },
     "stream_channel_capacity": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 64
+      "minimum": 1
     },
     "maintenance_callers": {
       "type": "array",
-      "minItems": 1,
-      "maxItems": 64,
-      "uniqueItems": true,
-      "items": { "$ref": "#/$defs/pluginInstance" }
+      "items": { "type": "string" }
     }
   },
-  "$defs": {
-    "secretReference": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 256,
-      "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
-    },
-    "pluginInstance": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 256,
-      "pattern": "^[A-Za-z0-9._:/-]+$"
-    }
-  },
-  "allOf": [
-    {
-      "if": {
-        "required": ["s3_allow_http"],
-        "properties": {"s3_allow_http": {"const": true}}
-      },
-      "then": {
-        "required": ["s3_endpoint"],
-        "properties": {"s3_endpoint": {"pattern": "^http://"}}
-      }
-    },
-    {
-      "if": {
-        "required": ["s3_endpoint"],
-        "properties": {"s3_endpoint": {"pattern": "^http://"}}
-      },
-      "then": {
-        "required": ["s3_allow_http"],
-        "properties": {"s3_allow_http": {"const": true}}
-      }
-    }
-  ],
   "additionalProperties": false
 }

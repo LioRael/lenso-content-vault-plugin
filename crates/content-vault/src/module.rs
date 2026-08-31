@@ -1239,12 +1239,11 @@ mod tests {
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("../configuration.schema.json"))
                 .expect("valid configuration schema");
-        assert_eq!(schema["properties"]["maintenance_callers"]["maxItems"], 64);
+        assert_configuration_schema_uses_app_plan_subset(&schema);
         assert_eq!(
-            schema["properties"]["quarantine_grace_seconds"]["maximum"],
-            MAX_QUARANTINE_GRACE_SECONDS
+            schema["properties"]["maintenance_callers"]["items"]["type"],
+            "string"
         );
-        assert_eq!(schema["allOf"][0]["then"]["required"][0], "s3_endpoint");
     }
 
     #[test]
@@ -1258,6 +1257,38 @@ mod tests {
             config().with_bounds(MAX_QUARANTINE_GRACE_SECONDS + 1, 100, 1),
             Err(ContentVaultConfigError::InvalidSweepBounds)
         );
+    }
+
+    fn assert_configuration_schema_uses_app_plan_subset(schema: &serde_json::Value) {
+        const SUPPORTED: &[&str] = &[
+            "$schema",
+            "additionalProperties",
+            "items",
+            "minimum",
+            "properties",
+            "required",
+            "title",
+            "type",
+        ];
+        let object = schema.as_object().expect("schema node is an object");
+        for keyword in object.keys() {
+            assert!(
+                SUPPORTED.contains(&keyword.as_str()),
+                "configuration schema keyword `{keyword}` is outside the App-plan subset"
+            );
+        }
+        if let Some(properties) = object.get("properties") {
+            for child in properties
+                .as_object()
+                .expect("schema properties are an object")
+                .values()
+            {
+                assert_configuration_schema_uses_app_plan_subset(child);
+            }
+        }
+        if let Some(items) = object.get("items") {
+            assert_configuration_schema_uses_app_plan_subset(items);
+        }
     }
 
     #[test]
