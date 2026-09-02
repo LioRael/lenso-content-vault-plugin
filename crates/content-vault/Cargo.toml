@@ -1,6 +1,6 @@
 [package]
 name = "lenso-content-vault-plugin"
-version = "0.1.0"
+version = "0.1.1"
 autotests = false
 edition.workspace = true
 license.workspace = true
@@ -35,7 +35,7 @@ futures.workspace = true
 hex.workspace = true
 image.workspace = true
 lenso.workspace = true
-lenso-capability-content-vault = { path = "../lenso-capability-content-vault", version = "0.1.0" }
+lenso-capability-content-vault = { path = "../lenso-capability-content-vault", version = "0.1.1" }
 lenso-capability-secrets.workspace = true
 lenso-postgres-kit.workspace = true
 object_store = { workspace = true, features = ["aws"] }

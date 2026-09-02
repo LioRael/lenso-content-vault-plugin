@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "lenso-capability-content-vault"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures",
  "lenso-contract-authoring",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "lenso-content-vault-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "async-trait",
